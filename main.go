@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"net"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"google.golang.org/grpc"
@@ -340,7 +341,11 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 
 			for i := prefixLen; i <= maxRpkiLength; i++ {
 				prefix := fmt.Sprintf("%s/%d", ip, i)
-				fmt.Printf("Vailded prefix: %s with origin %d\n", prefix, asn)
+				np, err := normalizePrefix(prefix)
+				if err != nil {
+					log.Fatal(err)
+				}
+				fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
 			}
 			strategyLen = maxRpkiLength
 			strategyAsn = asn
@@ -391,8 +396,12 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			peer.Peer.State.SessionState)
 
 		if dryrun {
-			fmt.Printf("[DRYRUN] Would add route %s/%d with origin %d to %s\n", 
-				ip, prefixLen, asn, peer.Peer.Conf.NeighborAddress)
+			np, err := normalizePrefix(fmt.Sprintf("%s/%d", ip, prefixLen))
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n", 
+				np, asn)
 			continue
 		}
 
@@ -412,6 +421,43 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 	// TODO: Implement certificate generation logic
 	fmt.Printf("Generating certificate for domain: %s\n", domain)
 	return nil
+}
+
+func normalizePrefix(ipWithPrefix string) (string, error) {
+	// Split IP and prefix length
+	parts := strings.Split(ipWithPrefix, "/")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid prefix format: %s", ipWithPrefix)
+	}
+
+	// Parse IP address
+	ip := net.ParseIP(parts[0])
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", parts[0])
+	}
+
+	// Parse prefix length
+	prefixLen, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return "", fmt.Errorf("invalid prefix length: %s", parts[1])
+	}
+
+	// Convert IP to 4-byte representation
+	ip = ip.To4()
+	if ip == nil {
+		return "", fmt.Errorf("not an IPv4 address: %s", parts[0])
+	}
+
+	// Create IPNet
+	ipNet := &net.IPNet{
+		IP:   ip,
+		Mask: net.CIDRMask(int(prefixLen), 32),
+	}
+
+	// Get network address
+	network := ipNet.IP.Mask(ipNet.Mask)
+
+	return fmt.Sprintf("%s/%d", network.String(), prefixLen), nil
 }
 
 func main() {
