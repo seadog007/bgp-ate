@@ -20,12 +20,22 @@ const (
 	grpcPort = 50051
 )
 
-
 type RipeResponse struct {
 	Data struct {
 		Resource string `json:"resource"`
 	} `json:"data"`
 }
+
+type Community struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type Config struct {
+	Community string `json:"community"`
+}
+
+var config Config
 
 func getCurrentPrefixLengthFromRipe(ip string) (uint32, error) {
 	// Construct the API URL
@@ -63,6 +73,91 @@ func getCurrentPrefixLengthFromRipe(ip string) (uint32, error) {
 	return uint32(prefixLen), nil
 }
 
+func loadConfig() error {
+	file, err := os.ReadFile("config.json")
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %v", err)
+	}
+
+	if err := json.Unmarshal(file, &config); err != nil {
+		return fmt.Errorf("failed to parse config file: %v", err)
+	}
+
+	return nil
+}
+
+func createCommunityAttributes() ([]*anypb.Any, error) {
+	var attrs []*anypb.Any
+
+	// Split the community value into parts
+	parts := strings.Split(config.Community, ":")
+	
+	// Check if it starts with "large:" prefix
+	if len(parts) > 0 && parts[0] == "large" {
+		// Remove the "large:" prefix and process as large community
+		parts = parts[1:]
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("invalid large community format: %s", config.Community)
+		}
+
+		globalAdmin, err := strconv.ParseUint(parts[0], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid global admin in large community: %s", parts[0])
+		}
+
+		localData1, err := strconv.ParseUint(parts[1], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid local data 1 in large community: %s", parts[1])
+		}
+
+		localData2, err := strconv.ParseUint(parts[2], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid local data 2 in large community: %s", parts[2])
+		}
+
+		// Create the large community attribute
+		largeCommunity := &api.LargeCommunitiesAttribute{
+			Communities: []*api.LargeCommunity{
+				{
+					GlobalAdmin: uint32(globalAdmin),
+					LocalData1:  uint32(localData1),
+					LocalData2:  uint32(localData2),
+				},
+			},
+		}
+		largeCommunityAttr, err := anypb.New(largeCommunity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create large community attribute: %v", err)
+		}
+		attrs = append(attrs, largeCommunityAttr)
+	} else if len(parts) == 2 {
+		// Process as standard community
+		as, err := strconv.ParseUint(parts[0], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AS number in standard community: %s", parts[0])
+		}
+
+		value, err := strconv.ParseUint(parts[1], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value in standard community: %s", parts[1])
+		}
+
+		// Create the standard community attribute
+		community := &api.CommunitiesAttribute{
+			Communities: []uint32{uint32(as<<16 | value)},
+		}
+		communityAttr, err := anypb.New(community)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create standard community attribute: %v", err)
+		}
+		attrs = append(attrs, communityAttr)
+	} else {
+		return nil, fmt.Errorf("invalid community format: %s", config.Community)
+	}
+
+	return attrs, nil
+}
+
 func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, prefixLen uint32, nextHop string) error {
 	// Create NLRI
 	nlri, err := anypb.New(&api.IPAddressPrefix{
@@ -89,13 +184,23 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 		return fmt.Errorf("failed to create origin attribute: %v", err)
 	}
 
+	// Create community attributes (both standard and large)
+	communityAttrs, err := createCommunityAttributes()
+	if err != nil {
+		return fmt.Errorf("failed to create community attributes: %v", err)
+	}
+
+	// Combine all path attributes
+	pattrs := []*anypb.Any{origin, nextHopAttr}
+	pattrs = append(pattrs, communityAttrs...)
+
 	path := &api.Path{
 		Family: &api.Family{
 			Afi:  api.Family_AFI_IP,
 			Safi: api.Family_SAFI_UNICAST,
 		},
 		Nlri:   nlri,
-		Pattrs: []*anypb.Any{origin, nextHopAttr},
+		Pattrs: pattrs,
 	}
 
 	_, err = client.AddPath(ctx, &api.AddPathRequest{
@@ -184,6 +289,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, pre
 			peer.Peer.State.SessionState)
 
 		// Add a new route using our local address as next-hop
+		// Add no-export community by default
 		err = addRoute(client, ctx, ip, prefixLen, peer.Peer.Transport.LocalAddress)
 		if err != nil {
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
@@ -202,6 +308,11 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 }
 
 func main() {
+	// Load configuration
+	if err := loadConfig(); err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
 	if len(os.Args) < 2 {
 		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip>  - Add hijack route for specified IP\n  certgen <domain> - Generate certificate for specified domain")
 	}
