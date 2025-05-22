@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"net/http"
+	"encoding/json"
+	"strconv"
+	"strings"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"google.golang.org/grpc"
@@ -15,6 +19,49 @@ import (
 const (
 	grpcPort = 50051
 )
+
+
+type RipeResponse struct {
+	Data struct {
+		Resource string `json:"resource"`
+	} `json:"data"`
+}
+
+func getCurrentPrefixLengthFromRipe(ip string) (uint32, error) {
+	// Construct the API URL
+	url := fmt.Sprintf("https://stat.ripe.net/data/bgp-state/data.json?resource=%s", ip)
+
+	// Make the HTTP request
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, fmt.Errorf("failed to call RIPE API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("RIPE API returned non-200 status: %d", resp.StatusCode)
+	}
+
+	// Parse the JSON response
+	var ripeResp RipeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ripeResp); err != nil {
+		return 0, fmt.Errorf("failed to parse RIPE API response: %v", err)
+	}
+
+	// Extract prefix length from the resource string (e.g., "103.147.22.0/24" -> 24)
+	parts := strings.Split(ripeResp.Data.Resource, "/")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid resource format: %s", ripeResp.Data.Resource)
+	}
+
+	prefixLen, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid prefix length: %s", parts[1])
+	}
+
+	return uint32(prefixLen), nil
+}
 
 func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, prefixLen uint32, nextHop string) error {
 	// Create NLRI
