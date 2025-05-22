@@ -62,45 +62,36 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 }
 
 func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
-	// Create NLRI for the route we want to delete
-	nlri, err := anypb.New(&api.IPAddressPrefix{
-		Prefix:    "10.0.0.0",
-		PrefixLen: 24,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create NLRI: %v", err)
-	}
-
-	// Create next-hop attribute
-	nextHopAttr, err := anypb.New(&api.NextHopAttribute{
-		NextHop: "0.0.0.0",
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create next-hop attribute: %v", err)
-	}
-
-	// Create origin attribute
-	origin, err := anypb.New(&api.OriginAttribute{
-		Origin: 0, // IGP
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create origin attribute: %v", err)
-	}
-
-	// Delete the specific route
-	_, err = client.DeletePath(ctx, &api.DeletePathRequest{
-		Path: &api.Path{
-			Family: &api.Family{
-				Afi:  api.Family_AFI_IP,
-				Safi: api.Family_SAFI_UNICAST,
-			},
-			Nlri:   nlri,
-			Pattrs: []*anypb.Any{origin, nextHopAttr},
+	// List all routes first
+	stream, err := client.ListPath(ctx, &api.ListPathRequest{
+		TableType: api.TableType_GLOBAL,
+		Family: &api.Family{
+			Afi:  api.Family_AFI_IP,
+			Safi: api.Family_SAFI_UNICAST,
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to clear route: %v", err)
+		return fmt.Errorf("failed to list routes: %v", err)
 	}
+
+	// Process each route
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			break // End of stream
+		}
+
+		// Delete each route individually
+		_, err = client.DeletePath(ctx, &api.DeletePathRequest{
+			Path: response.Destination.Paths[0],
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete route %s: %v", response.Destination.Prefix, err)
+		}
+		fmt.Printf("Deleted route: %s\n", response.Destination.Prefix)
+	}
+
+	fmt.Println("All routes cleared successfully")
 	return nil
 }
 
