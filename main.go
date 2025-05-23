@@ -35,6 +35,7 @@ const (
 type Config struct {
 	Community string `json:"community"`
 	Time      int    `json:"time"` // Time in seconds to wait after hijacking
+	TimeBeforeGeneratingCertificate int    `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
 }
 
 var config Config
@@ -378,11 +379,15 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 	}
 
 	// New users will need to register
-	reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
-	if err != nil {
-		return fmt.Errorf("failed to register: %v", err)
+	if dryrun {
+		fmt.Printf("[DRYRUN] Would register user for domain: %s\n", domain)
+	} else {
+		reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+		if err != nil {
+			return fmt.Errorf("failed to register: %v", err)
+		}
+		myUser.Registration = reg
 	}
-	myUser.Registration = reg
 
 	request := certificate.ObtainRequest{
 		Domains: []string{domain},
@@ -429,9 +434,21 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 	if err := hijackRoutes(client, ctx, ip.String(), dryrun); err != nil {
 		return fmt.Errorf("failed to hijack routes: %v", err)
 	}
+	
+	// Wait for the configured time before generating certificate
+	if config.TimeBeforeGeneratingCertificate > 0 {
+		fmt.Printf("[INFO] Waiting for %d seconds before generating certificate...\n", config.TimeBeforeGeneratingCertificate)
+		time.Sleep(time.Duration(config.TimeBeforeGeneratingCertificate) * time.Second)
+		fmt.Println("[INFO] Wait completed")
+	}
 
 	// TODO: Generate certificate
 	if err := generateCertificate(client, ctx, domain, ip.String(), dryrun); err != nil {
+		// Even if generate certificate failed, we still need to clear routes
+		if err := clearRoutes(client, ctx); err != nil {
+			fmt.Printf("[DANGER] Failed to clear routes: %v\n", err)
+			return fmt.Errorf("failed to clear routes: %v", err)
+		}
 		return fmt.Errorf("failed to generate certificate: %v", err)
 	}
 
