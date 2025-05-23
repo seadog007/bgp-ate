@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"net/http"
-	"encoding/json"
 	"strconv"
 	"strings"
-	"net"
 	"time"
 
 	api "github.com/osrg/gobgp/v3/api"
+	"bgpate/pkg/ripe"
+	"bgpate/pkg/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -22,133 +22,12 @@ const (
 	grpcPort = 50051
 )
 
-type RipeResponse struct {
-	Data struct {
-		ASNs   []string `json:"asns"`
-		Prefix string   `json:"prefix"`
-	} `json:"data"`
-}
-
-type Community struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
 type Config struct {
 	Community string `json:"community"`
 	Time      int    `json:"time"` // Time in seconds to wait after hijacking
 }
 
-type RipeRpkiResponse struct {
-	Data struct {
-		Status         string `json:"status"`
-		ValidatingROAs []struct {
-			Origin     string `json:"origin"`
-			Prefix     string `json:"prefix"`
-			MaxLength  int    `json:"max_length"`
-			Validity   string `json:"validity"`
-		} `json:"validating_roas"`
-	} `json:"data"`
-}
-
 var config Config
-
-func getCurrentPrefixInfoFromRipe(ip string) (uint32, []uint32, error) {
-	// Construct the API URL
-	url := fmt.Sprintf("https://stat.ripe.net/data/network-info/data.json?resource=%s", ip)
-	fmt.Printf("[DEBUG] Calling RIPE Network Info API: %s\n", url)
-
-	// Make the HTTP request
-	resp, err := http.Get(url)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to call RIPE API: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		return 0, nil, fmt.Errorf("RIPE API returned non-200 status: %d", resp.StatusCode)
-	}
-
-	// Parse the JSON response
-	var ripeResp RipeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ripeResp); err != nil {
-		return 0, nil, fmt.Errorf("failed to parse RIPE API response: %v", err)
-	}
-
-	// Print the ASNs and prefix
-	fmt.Printf("[DEBUG] Current DFZ: %s with origin %s\n", ripeResp.Data.Prefix, ripeResp.Data.ASNs)
-
-	// Extract prefix length from the prefix string (e.g., "103.147.22.0/24" -> 24)
-	parts := strings.Split(ripeResp.Data.Prefix, "/")
-	if len(parts) != 2 {
-		return 0, nil, fmt.Errorf("invalid prefix format: %s", ripeResp.Data.Prefix)
-	}
-
-	prefixLen, err := strconv.ParseUint(parts[1], 10, 32)
-	if err != nil {
-		return 0, nil, fmt.Errorf("invalid prefix length: %s", parts[1])
-	}
-
-	// Parse all ASNs from the list
-	var asns []uint32
-	for _, asnStr := range ripeResp.Data.ASNs {
-		asnNum, err := strconv.ParseUint(asnStr, 10, 32)
-		if err != nil {
-			return 0, nil, fmt.Errorf("invalid ASN format: %s", asnStr)
-		}
-		asns = append(asns, uint32(asnNum))
-	}
-	fmt.Printf("[DEBUG] Parsed ASNs: %v\n", asns)
-
-	return uint32(prefixLen), asns, nil
-}
-
-func getCurrentRpkiInfoFromRipe(prefix string, asn uint32) (uint32, error) {
-	// Construct the API URL
-	url := fmt.Sprintf("https://stat.ripe.net/data/rpki-validation/data.json?resource=%d&prefix=%s", asn, prefix)
-	fmt.Printf("[DEBUG] Calling RIPE RPKI Validation API: %s\n", url)
-
-	// Make the HTTP request
-	resp, err := http.Get(url)
-	if err != nil {
-		return 0, fmt.Errorf("failed to call RIPE API: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("RIPE API returned non-200 status: %d", resp.StatusCode)
-	}
-
-	// Parse the JSON response
-	var ripeResp RipeRpkiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ripeResp); err != nil {
-		return 0, fmt.Errorf("failed to parse RIPE API response: %v", err)
-	}
-
-	// Print RPKI validation information
-	fmt.Printf("[DEBUG] RPKI Validation Response - Status: %s\n", ripeResp.Data.Status)
-	
-	// Find the maximum prefix length from valid ROAs
-	var maxLength uint32
-	if len(ripeResp.Data.ValidatingROAs) > 0 {
-		fmt.Println("[DEBUG] Validating ROAs:")
-		for _, roa := range ripeResp.Data.ValidatingROAs {
-			fmt.Printf("[DEBUG]   Origin: %s, Prefix: %s, Max Length: %d, Validity: %s\n", 
-				roa.Origin, roa.Prefix, roa.MaxLength, roa.Validity)
-			
-			// Update maxLength if this ROA is valid and has a larger max length
-			if roa.Validity == "valid" && uint32(roa.MaxLength) > maxLength {
-				maxLength = uint32(roa.MaxLength)
-			}
-		}
-	} else {
-		fmt.Println("[DEBUG] No validating ROAs found")
-	}
-
-	return maxLength, nil
-}
 
 func loadConfig() error {
 	file, err := os.ReadFile("config.json")
@@ -343,7 +222,7 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 
 func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 	// Check if it's an IPv4 address
-	prefixLen, asns, err := getCurrentPrefixInfoFromRipe(ip)
+	prefixLen, asns, err := ripe.GetCurrentPrefixInfoFromRipe(ip)
 
 	var strategyAsn uint32
 	var strategyLen uint32
@@ -352,7 +231,7 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 		// Check RPKI validation for each ASN
 		prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
 		for _, asn := range asns {
-			maxRpkiLength, err := getCurrentRpkiInfoFromRipe(prefix, asn)
+			maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
 			if err != nil {
 				fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
 				continue
@@ -360,7 +239,7 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 
 			for i := prefixLen; i <= maxRpkiLength; i++ {
 				prefix := fmt.Sprintf("%s/%d", ip, i)
-				np, err := normalizePrefix(prefix)
+				np, err := utils.NormalizePrefix(prefix)
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -414,13 +293,12 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			peer.Peer.Conf.PeerAsn,
 			peer.Peer.State.SessionState)
 
-		np, err := normalizePrefix(fmt.Sprintf("%s/%d", ip, prefixLen))
+		np, err := utils.NormalizePrefix(fmt.Sprintf("%s/%d", ip, prefixLen))
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		if dryrun {
-			
 			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n", 
 				np, asn)
 			continue
@@ -443,43 +321,6 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 	// TODO: Implement certificate generation logic
 	fmt.Printf("Generating certificate for domain: %s\n", domain)
 	return nil
-}
-
-func normalizePrefix(ipWithPrefix string) (string, error) {
-	// Split IP and prefix length
-	parts := strings.Split(ipWithPrefix, "/")
-	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid prefix format: %s", ipWithPrefix)
-	}
-
-	// Parse IP address
-	ip := net.ParseIP(parts[0])
-	if ip == nil {
-		return "", fmt.Errorf("invalid IP address: %s", parts[0])
-	}
-
-	// Parse prefix length
-	prefixLen, err := strconv.ParseUint(parts[1], 10, 32)
-	if err != nil {
-		return "", fmt.Errorf("invalid prefix length: %s", parts[1])
-	}
-
-	// Convert IP to 4-byte representation
-	ip = ip.To4()
-	if ip == nil {
-		return "", fmt.Errorf("not an IPv4 address: %s", parts[0])
-	}
-
-	// Create IPNet
-	ipNet := &net.IPNet{
-		IP:   ip,
-		Mask: net.CIDRMask(int(prefixLen), 32),
-	}
-
-	// Get network address
-	network := ipNet.IP.Mask(ipNet.Mask)
-
-	return fmt.Sprintf("%s/%d", network.String(), prefixLen), nil
 }
 
 func main() {
