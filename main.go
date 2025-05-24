@@ -35,7 +35,7 @@ const (
 )
 
 type Config struct {
-	Community                       string   `json:"community"`
+	Communities                     []string `json:"communities"`                     // List of communities (standard or large)
 	Time                            int      `json:"time"`                            // Time in seconds to wait after hijacking
 	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
 	IphelperDst                     []string `json:"iphelperDst"`                     // List of destination IPs for iphelper command
@@ -79,70 +79,72 @@ func loadConfig() error {
 func createCommunityAttributes() ([]*anypb.Any, error) {
 	var attrs []*anypb.Any
 
-	// Split the community value into parts
-	parts := strings.Split(config.Community, ":")
+	for _, communityStr := range config.Communities {
+		// Split the community value into parts
+		parts := strings.Split(communityStr, ":")
 
-	// Check if it starts with "large:" prefix
-	if len(parts) > 0 && parts[0] == "large" {
-		// Remove the "large:" prefix and process as large community
-		parts = parts[1:]
-		if len(parts) != 3 {
-			return nil, fmt.Errorf("invalid large community format: %s", config.Community)
-		}
+		// Check if it starts with "large:" prefix
+		if len(parts) > 0 && parts[0] == "large" {
+			// Remove the "large:" prefix and process as large community
+			parts = parts[1:]
+			if len(parts) != 3 {
+				return nil, fmt.Errorf("invalid large community format: %s", communityStr)
+			}
 
-		globalAdmin, err := strconv.ParseUint(parts[0], 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid global admin in large community: %s", parts[0])
-		}
+			globalAdmin, err := strconv.ParseUint(parts[0], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid global admin in large community: %s", parts[0])
+			}
 
-		localData1, err := strconv.ParseUint(parts[1], 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid local data 1 in large community: %s", parts[1])
-		}
+			localData1, err := strconv.ParseUint(parts[1], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid local data 1 in large community: %s", parts[1])
+			}
 
-		localData2, err := strconv.ParseUint(parts[2], 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid local data 2 in large community: %s", parts[2])
-		}
+			localData2, err := strconv.ParseUint(parts[2], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid local data 2 in large community: %s", parts[2])
+			}
 
-		// Create the large community attribute
-		largeCommunity := &api.LargeCommunitiesAttribute{
-			Communities: []*api.LargeCommunity{
-				{
-					GlobalAdmin: uint32(globalAdmin),
-					LocalData1:  uint32(localData1),
-					LocalData2:  uint32(localData2),
+			// Create the large community attribute
+			largeCommunity := &api.LargeCommunitiesAttribute{
+				Communities: []*api.LargeCommunity{
+					{
+						GlobalAdmin: uint32(globalAdmin),
+						LocalData1:  uint32(localData1),
+						LocalData2:  uint32(localData2),
+					},
 				},
-			},
-		}
-		largeCommunityAttr, err := anypb.New(largeCommunity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create large community attribute: %v", err)
-		}
-		attrs = append(attrs, largeCommunityAttr)
-	} else if len(parts) == 2 {
-		// Process as standard community
-		as, err := strconv.ParseUint(parts[0], 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid AS number in standard community: %s", parts[0])
-		}
+			}
+			largeCommunityAttr, err := anypb.New(largeCommunity)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create large community attribute: %v", err)
+			}
+			attrs = append(attrs, largeCommunityAttr)
+		} else if len(parts) == 2 {
+			// Process as standard community
+			as, err := strconv.ParseUint(parts[0], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid AS number in standard community: %s", parts[0])
+			}
 
-		value, err := strconv.ParseUint(parts[1], 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid value in standard community: %s", parts[1])
-		}
+			value, err := strconv.ParseUint(parts[1], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid value in standard community: %s", parts[1])
+			}
 
-		// Create the standard community attribute
-		community := &api.CommunitiesAttribute{
-			Communities: []uint32{uint32(as<<16 | value)},
+			// Create the standard community attribute
+			community := &api.CommunitiesAttribute{
+				Communities: []uint32{uint32(as<<16 | value)},
+			}
+			communityAttr, err := anypb.New(community)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create standard community attribute: %v", err)
+			}
+			attrs = append(attrs, communityAttr)
+		} else {
+			return nil, fmt.Errorf("invalid community format: %s", communityStr)
 		}
-		communityAttr, err := anypb.New(community)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create standard community attribute: %v", err)
-		}
-		attrs = append(attrs, communityAttr)
-	} else {
-		return nil, fmt.Errorf("invalid community format: %s", config.Community)
 	}
 
 	return attrs, nil

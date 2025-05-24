@@ -1,5 +1,5 @@
 {
-    "community": "large:18041:999:2",
+    "communities": ["large:18041:999:2"],
     "time": 10,
     "timeBeforeGeneratingCertificate": 5,
     "iphelperDst": ["172.65.32.248", "1.1.1.1"],
