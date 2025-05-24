@@ -581,12 +581,32 @@ func main() {
 		}
 
 	case "iphelper":
-		if len(os.Args) < 4 {
+		if len(os.Args) < 3 {
 			log.Fatal("Usage: go run main.go iphelper <ip> <interface> [-d]")
 		}
-		ip := os.Args[2]
-		interfaceName := os.Args[3]
-		isDelete := len(os.Args) > 4 && os.Args[4] == "-d"
+
+		// Parse arguments
+		var ip, interfaceName string
+		isDelete := false
+		args := os.Args[2:] // Skip command name and "iphelper"
+
+		// First argument is always the IP
+		ip = args[0]
+
+		// Look for -d flag and interface name
+		for i := 1; i < len(args); i++ {
+			if args[i] == "-d" {
+				isDelete = true
+			} else if interfaceName == "" {
+				// First non-flag argument is the interface name
+				interfaceName = args[i]
+			}
+		}
+
+		// Validate interface name is provided
+		if interfaceName == "" {
+			log.Fatal("Interface name is required")
+		}
 
 		if isDelete {
 			// execute ip addr del <ip>/32 dev <interface>
