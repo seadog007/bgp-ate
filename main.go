@@ -12,8 +12,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"bgpate/pkg/ripe"
@@ -525,9 +527,9 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain\n  iphelper <ip> <interface> [-d] - Add or remove IP helper route")
-	}
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGINT)
 
 	// Connect to GoBGP daemon
 	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", grpcPort),
@@ -539,6 +541,24 @@ func main() {
 
 	client := api.NewGobgpApiClient(conn)
 	ctx := context.Background()
+
+	// Start a goroutine to handle cleanup on interrupt
+	go func() {
+		<-sigChan
+		fmt.Println("\nReceived interrupt signal. Cleaning up...")
+
+		// Clear all routes
+		if err := clearRoutes(client, ctx); err != nil {
+			fmt.Printf("Error during cleanup: %v\n", err)
+		} else {
+			fmt.Println("Cleanup completed successfully")
+		}
+		os.Exit(0)
+	}()
+
+	if len(os.Args) < 2 {
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain\n  iphelper <ip> <interface> [-d] - Add or remove IP helper route")
+	}
 
 	switch os.Args[1] {
 	case "clear":
