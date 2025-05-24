@@ -40,6 +40,9 @@ type Config struct {
 	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
 	IphelperDst                     []string `json:"iphelperDst"`                     // List of destination IPs for iphelper command
 	IphelperGateway                 string   `json:"iphelperGateway"`                 // Gateway IP for iphelper command
+	CADirURL                        string   `json:"caDirUrl"`                        // ACME CA directory URL
+	EABKid                          string   `json:"eabKid"`                          // External Account Binding Key ID
+	EABHmacKey                      string   `json:"eabHmacKey"`                      // External Account Binding HMAC Key
 }
 
 var config Config
@@ -365,14 +368,18 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 		key:   privateKey,
 	}
 
-	config := lego.NewConfig(&myUser)
+	legoConfig := lego.NewConfig(&myUser)
 
-	// Use Let's Encrypt production server
-	config.CADirURL = lego.LEDirectoryProduction
-	config.Certificate.KeyType = certcrypto.RSA2048
+	// Use configured CA directory URL or default to Let's Encrypt production
+	if config.CADirURL != "" {
+		legoConfig.CADirURL = config.CADirURL
+	} else {
+		legoConfig.CADirURL = lego.LEDirectoryProduction
+	}
+	legoConfig.Certificate.KeyType = certcrypto.RSA2048
 
 	// A client facilitates communication with the CA server.
-	legoClient, err := lego.NewClient(config)
+	legoClient, err := lego.NewClient(legoConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create lego client: %v", err)
 	}
@@ -388,7 +395,24 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 	if dryrun {
 		fmt.Printf("[DRYRUN] Would register user for domain: %s\n", domain)
 	} else {
-		reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+		var reg *registration.Resource
+		var err error
+
+		// Use EAB if configured, otherwise use standard registration
+		if config.EABKid != "" && config.EABHmacKey != "" {
+			reg, err = legoClient.Registration.RegisterWithExternalAccountBinding(
+				registration.RegisterEABOptions{
+					TermsOfServiceAgreed: true,
+					Kid:                  config.EABKid,
+					HmacEncoded:          config.EABHmacKey,
+				},
+			)
+		} else {
+			reg, err = legoClient.Registration.Register(
+				registration.RegisterOptions{TermsOfServiceAgreed: true},
+			)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to register: %v", err)
 		}
