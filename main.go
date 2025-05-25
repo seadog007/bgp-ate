@@ -40,7 +40,6 @@ type Config struct {
 	Communities                     []string `json:"communities"`                     // List of communities (standard or large)
 	Time                            int      `json:"time"`                            // Time in seconds to wait after hijacking
 	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
-	IphelperDst                     []string `json:"iphelperDst"`                     // List of destination IPs for iphelper command
 	IphelperGateway                 string   `json:"iphelperGateway"`                 // Gateway IP for iphelper command
 	CADirURL                        string   `json:"caDirUrl"`                        // ACME CA directory URL
 	EABKid                          string   `json:"eabKid"`                          // External Account Binding Key ID
@@ -499,28 +498,6 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 	return nil
 }
 
-func getDefaultGateway(interfaceName string) (string, error) {
-	cmd := exec.Command("ip", "route", "show", "dev", interfaceName)
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get routes for interface %s: %v", interfaceName, err)
-	}
-
-	// Parse the output to find the default gateway
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "default via") {
-			fields := strings.Fields(line)
-			for i, field := range fields {
-				if field == "via" && i+1 < len(fields) {
-					return fields[i+1], nil
-				}
-			}
-		}
-	}
-	return "", fmt.Errorf("no default gateway found for interface %s", interfaceName)
-}
-
 func main() {
 	// Load configuration
 	if err := loadConfig(); err != nil {
@@ -557,7 +534,7 @@ func main() {
 	}()
 
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain\n  iphelper <ip> <interface> [-d] - Add or remove IP helper route")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain\n  iphelper <ip> [-d] - Add or remove IP helper route")
 	}
 
 	switch os.Args[1] {
@@ -602,73 +579,83 @@ func main() {
 
 	case "iphelper":
 		if len(os.Args) < 3 {
-			log.Fatal("Usage: go run main.go iphelper <ip> <interface> [-d]")
+			log.Fatal("Usage: go run main.go iphelper <ip> [-d]")
 		}
 
 		// Parse arguments
-		var ip, interfaceName string
+		var ip string
 		isDelete := false
 		args := os.Args[2:] // Skip command name and "iphelper"
 
 		// First argument is always the IP
 		ip = args[0]
 
-		// Look for -d flag and interface name
+		// Look for -d flag
 		for i := 1; i < len(args); i++ {
 			if args[i] == "-d" {
 				isDelete = true
-			} else if interfaceName == "" {
-				// First non-flag argument is the interface name
-				interfaceName = args[i]
 			}
 		}
 
-		// Validate interface name is provided
-		if interfaceName == "" {
-			log.Fatal("Interface name is required")
-		}
-
 		if isDelete {
-			// execute ip addr del <ip>/32 dev <interface>
-			cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", interfaceName)
+			// execute ip addr del <ip>/32 dev lo
+			cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", "lo")
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
 				log.Fatalf("Failed to execute ip addr del: %v", err)
 			}
-		} else {
-			// Get the gateway - use config if specified, otherwise get from interface
-			var gateway string
-			var err error
-			if config.IphelperGateway != "" {
-				gateway = config.IphelperGateway
-			} else {
-				gateway, err = getDefaultGateway(interfaceName)
-				if err != nil {
-					log.Fatalf("Failed to get default gateway: %v", err)
-				}
+
+			// execute ip rule del from <ip>/32 table 87
+			cmd = exec.Command("ip", "rule", "del", "from", ip+"/32", "table", "87")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Fatalf("Failed to execute ip rule del: %v", err)
 			}
 
-			// execute ip addr add <ip>/32 dev <interface>
-			cmd := exec.Command("ip", "addr", "add", ip+"/32", "dev", interfaceName)
+			// execute ip route flush table 87
+			cmd = exec.Command("ip", "route", "flush", "table", "87")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Fatalf("Failed to execute ip route flush: %v", err)
+			}
+
+			fmt.Println("IP helper route deleted successfully")
+		} else {
+			// Get the gateway from config
+			if config.IphelperGateway == "" {
+				log.Fatal("IphelperGateway must be specified in config.json")
+			}
+
+			// Bind IP to lo interface
+			cmd := exec.Command("ip", "addr", "add", ip+"/32", "dev", "lo")
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
 				log.Fatalf("Failed to execute ip addr add: %v", err)
 			}
 
-			// Add routes for each destination IP from config
-			for _, dstIP := range config.IphelperDst {
-				cmd = exec.Command("ip", "route", "add", dstIP+"/32", "via", gateway, "src", ip)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
-					log.Fatalf("Failed to execute ip route add for %s: %v", dstIP, err)
-				}
+			// Add rule for the src IP
+			cmd = exec.Command("ip", "rule", "add", "from", ip+"/32", "table", "87")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Fatalf("Failed to execute ip rule add: %v", err)
 			}
+
+			// Add default route for the src IP
+			cmd = exec.Command("ip", "route", "add", "default", "via", config.IphelperGateway, "table", "87")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Fatalf("Failed to execute ip route add: %v", err)
+			}
+			fmt.Println("IP helper route added successfully")
 		}
 
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun], iphelper <ip> <interface> [-d]")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun], iphelper <ip> [-d]")
 	}
 }

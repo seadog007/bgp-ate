@@ -54,7 +54,6 @@ The system uses `gobgpd.conf` for GoBGP configuration and `config.json` file for
     "communities": ["large:18041:999:2"],
     "time": 10,
     "timeBeforeGeneratingCertificate": 5,
-    "iphelperDst": ["172.65.32.248", "1.1.1.1"],
     "iphelperGateway": "192.168.99.1",
     "caDirUrl": "https://acme-v02.api.letsencrypt.org/directory",
     "eabKid": "",
@@ -69,7 +68,6 @@ The system uses `gobgpd.conf` for GoBGP configuration and `config.json` file for
   - Large format: `"large:AS:value1:value2"` (e.g., `"large:18041:999:2"`)
 - `time`: Time in seconds to wait after hijacking
 - `timeBeforeGeneratingCertificate`: Time in seconds to wait before generating certificate
-- `iphelperDst`: List of destination IPs for iphelper command
 - `iphelperGateway`: Gateway IP for iphelper command (optional, will use interface's default gateway if not specified)
 - `caDirUrl`: ACME CA directory URL (optional, defaults to Let's Encrypt production)
 - `eabKid`: External Account Binding Key ID (optional)
@@ -126,14 +124,14 @@ go build
 
 ### IP Helper
 ```bash
-./bgpate iphelper <ip> <interface> [-d]
+./bgpate iphelper <ip> [-d]
 ```
 
 ## Full BGP Hijack Attack Procedures
 
 1. Run 
 ```bash
-./bgpate iphelper <ip> <interface>
+./bgpate iphelper <ip>
 ```
 
 2. 
@@ -143,12 +141,12 @@ go build
 
 3. Run curl to confirm the hijacking is success
 ```
-curl --interface 1.172.110.76 https://1.1.1.1/cdn-cgi/trace
+curl --interface <ip> https://1.1.1.1/cdn-cgi/trace
 ```
 
 4. Remove IP configuration on the system
 ```bash
-./bgpate iphelper <ip> <interface> -d
+./bgpate iphelper <ip> -d
 ```
 
 ## Full Certification Generating Attack Procedures
