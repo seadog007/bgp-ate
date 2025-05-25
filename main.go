@@ -461,6 +461,12 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 		return fmt.Errorf("multiple IPs found for domain: %s", domain)
 	}
 	ip := ips[0]
+
+	// Run IP helper
+	if err := iphelper(ip.String(), false); err != nil {
+		return fmt.Errorf("failed to run iphelper: %v", err)
+	}
+
 	// hijack routes
 	if err := hijackRoutes(client, ctx, ip.String(), dryrun); err != nil {
 		return fmt.Errorf("failed to hijack routes: %v", err)
@@ -480,6 +486,11 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 			fmt.Printf("[DANGER] Failed to clear routes: %v\n", err)
 			return fmt.Errorf("failed to clear routes: %v", err)
 		}
+
+		// Run IP helper delete
+		if err := iphelper(ip.String(), true); err != nil {
+			return fmt.Errorf("failed to run iphelper: %v", err)
+		}
 		return fmt.Errorf("failed to generate certificate: %v", err)
 	}
 
@@ -493,8 +504,97 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 	if err := clearRoutes(client, ctx); err != nil {
 		return fmt.Errorf("failed to clear routes: %v", err)
 	}
+
+	// Run IP helper delete
+	if err := iphelper(ip.String(), true); err != nil {
+		return fmt.Errorf("failed to run iphelper: %v", err)
+	}
+
 	fmt.Println("Hijacked successfully")
 
+	return nil
+}
+
+func iphelper(ip string, isDelete bool) error {
+	if isDelete {
+		// execute ip addr del <ip>/32 dev lo
+		cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", "lo")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to execute ip addr del: %v", err)
+		}
+
+		// execute ip rule del from <ip>/32 table 87
+		cmd = exec.Command("ip", "rule", "del", "from", ip+"/32", "table", "87")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to execute ip rule del: %v", err)
+		}
+
+		// execute ip route flush table 87
+		cmd = exec.Command("ip", "route", "flush", "table", "87")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to execute ip route flush: %v", err)
+		}
+
+		fmt.Println("IP helper route deleted successfully")
+		return nil
+	}
+
+	// Get the gateway from config
+	if config.IphelperGateway == "" {
+		return fmt.Errorf("IphelperGateway must be specified in config.json")
+	}
+
+	// Check if IP is already assigned to lo interface
+	cmd := exec.Command("ip", "addr", "show", "dev", "lo")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check lo interface: %v", err)
+	}
+
+	// Only add the IP if it's not already assigned
+	if !strings.Contains(string(output), ip+"/32") {
+		cmd = exec.Command("ip", "addr", "add", ip+"/32", "dev", "lo")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to execute ip addr add: %v", err)
+		}
+	}
+
+	// Add rule for the src IP
+	cmd = exec.Command("ip", "rule", "add", "from", ip+"/32", "table", "87")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to execute ip rule add: %v", err)
+	}
+
+	// Check if table 87 exists and flush it if it does
+	cmd = exec.Command("ip", "route", "show", "table", "87")
+	if err := cmd.Run(); err == nil {
+		// Table exists, flush it
+		cmd = exec.Command("ip", "route", "flush", "table", "87")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to flush table 87: %v", err)
+		}
+	}
+
+	// Add default route for the src IP
+	cmd = exec.Command("ip", "route", "add", "default", "via", config.IphelperGateway, "table", "87")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to add default route: %v", err)
+	}
+	fmt.Println("IP helper route added successfully")
 	return nil
 }
 
@@ -597,62 +697,8 @@ func main() {
 			}
 		}
 
-		if isDelete {
-			// execute ip addr del <ip>/32 dev lo
-			cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", "lo")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Fatalf("Failed to execute ip addr del: %v", err)
-			}
-
-			// execute ip rule del from <ip>/32 table 87
-			cmd = exec.Command("ip", "rule", "del", "from", ip+"/32", "table", "87")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Fatalf("Failed to execute ip rule del: %v", err)
-			}
-
-			// execute ip route flush table 87
-			cmd = exec.Command("ip", "route", "flush", "table", "87")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Fatalf("Failed to execute ip route flush: %v", err)
-			}
-
-			fmt.Println("IP helper route deleted successfully")
-		} else {
-			// Get the gateway from config
-			if config.IphelperGateway == "" {
-				log.Fatal("IphelperGateway must be specified in config.json")
-			}
-
-			// Bind IP to lo interface
-			cmd := exec.Command("ip", "addr", "add", ip+"/32", "dev", "lo")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Fatalf("Failed to execute ip addr add: %v", err)
-			}
-
-			// Add rule for the src IP
-			cmd = exec.Command("ip", "rule", "add", "from", ip+"/32", "table", "87")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Fatalf("Failed to execute ip rule add: %v", err)
-			}
-
-			// Add default route for the src IP
-			cmd = exec.Command("ip", "route", "add", "default", "via", config.IphelperGateway, "table", "87")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Fatalf("Failed to execute ip route add: %v", err)
-			}
-			fmt.Println("IP helper route added successfully")
+		if err := iphelper(ip, isDelete); err != nil {
+			log.Fatalf("Failed to execute iphelper: %v", err)
 		}
 
 	default:
