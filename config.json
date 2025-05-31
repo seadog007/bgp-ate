@@ -2,7 +2,8 @@
     "communities": ["large:18041:999:2"],
     "time": 10,
     "timeBeforeGeneratingCertificate": 5,
-    "iphelperGateway": "192.168.99.1",
+    "iphelperGatewayV4": "192.168.99.1",
+    "iphelperGatewayV6": "2401:16a0:999::1",
     "caDirUrl": "https://acme-v02.api.letsencrypt.org/directory",
     "eabKid": "",
     "eabHmacKey": ""

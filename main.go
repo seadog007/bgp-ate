@@ -40,7 +40,8 @@ type Config struct {
 	Communities                     []string `json:"communities"`                     // List of communities (standard or large)
 	Time                            int      `json:"time"`                            // Time in seconds to wait after hijacking
 	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
-	IphelperGateway                 string   `json:"iphelperGateway"`                 // Gateway IP for iphelper command
+	IphelperGatewayV4               string   `json:"iphelperGatewayV4"`               // IPv4 Gateway IP for iphelper command
+	IphelperGatewayV6               string   `json:"iphelperGatewayV6"`               // IPv6 Gateway IP for iphelper command
 	CADirURL                        string   `json:"caDirUrl"`                        // ACME CA directory URL
 	EABKid                          string   `json:"eabKid"`                          // External Account Binding Key ID
 	EABHmacKey                      string   `json:"eabHmacKey"`                      // External Account Binding HMAC Key
@@ -516,17 +517,34 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 }
 
 func iphelper(ip string, isDelete bool) error {
+	// Parse the IP address to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+
+	// Determine prefix length based on IP version
+	prefixLen := "32"
+	isIPv6 := parsedIP.To4() == nil
+	if isIPv6 {
+		prefixLen = "128" // IPv6 uses /128 for single addresses
+	}
+
 	if isDelete {
-		// execute ip addr del <ip>/32 dev lo
-		cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", "lo")
+		// execute ip addr del <ip>/<prefixLen> dev lo
+		cmd := exec.Command("ip", "addr", "del", ip+"/"+prefixLen, "dev", "lo")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to execute ip addr del: %v", err)
 		}
 
-		// execute ip rule del from <ip>/32 table 87
-		cmd = exec.Command("ip", "rule", "del", "from", ip+"/32", "table", "87")
+		// execute ip rule del from <ip>/<prefixLen> table 87
+		ruleCmd := []string{"rule", "del", "from", ip + "/" + prefixLen, "table", "87"}
+		if isIPv6 {
+			ruleCmd = append([]string{"-6"}, ruleCmd...)
+		}
+		cmd = exec.Command("ip", ruleCmd...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -534,7 +552,11 @@ func iphelper(ip string, isDelete bool) error {
 		}
 
 		// execute ip route flush table 87
-		cmd = exec.Command("ip", "route", "flush", "table", "87")
+		routeCmd := []string{"route", "flush", "table", "87"}
+		if isIPv6 {
+			routeCmd = append([]string{"-6"}, routeCmd...)
+		}
+		cmd = exec.Command("ip", routeCmd...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -545,9 +567,23 @@ func iphelper(ip string, isDelete bool) error {
 		return nil
 	}
 
-	// Get the gateway from config
-	if config.IphelperGateway == "" {
-		return fmt.Errorf("IphelperGateway must be specified in config.json")
+	// Get the appropriate gateway from config based on IP version
+	var gatewayIP string
+	if isIPv6 {
+		if config.IphelperGatewayV6 == "" {
+			return fmt.Errorf("IphelperGatewayV6 must be specified in config.json for IPv6 addresses")
+		}
+		gatewayIP = config.IphelperGatewayV6
+	} else {
+		if config.IphelperGatewayV4 == "" {
+			return fmt.Errorf("IphelperGatewayV4 must be specified in config.json for IPv4 addresses")
+		}
+		gatewayIP = config.IphelperGatewayV4
+	}
+
+	// Validate gateway IP format
+	if net.ParseIP(gatewayIP) == nil {
+		return fmt.Errorf("invalid gateway IP address: %s", gatewayIP)
 	}
 
 	// Check if IP is already assigned to lo interface
@@ -558,8 +594,8 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Only add the IP if it's not already assigned
-	if !strings.Contains(string(output), ip+"/32") {
-		cmd = exec.Command("ip", "addr", "add", ip+"/32", "dev", "lo")
+	if !strings.Contains(string(output), ip+"/"+prefixLen) {
+		cmd = exec.Command("ip", "addr", "add", ip+"/"+prefixLen, "dev", "lo")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -568,7 +604,11 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Add rule for the src IP
-	cmd = exec.Command("ip", "rule", "add", "from", ip+"/32", "table", "87")
+	ruleCmd := []string{"rule", "add", "from", ip + "/" + prefixLen, "table", "87"}
+	if isIPv6 {
+		ruleCmd = append([]string{"-6"}, ruleCmd...)
+	}
+	cmd = exec.Command("ip", ruleCmd...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -576,10 +616,18 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Check if table 87 exists and flush it if it does
-	cmd = exec.Command("ip", "route", "show", "table", "87")
+	routeCmd := []string{"route", "show", "table", "87"}
+	if isIPv6 {
+		routeCmd = append([]string{"-6"}, routeCmd...)
+	}
+	cmd = exec.Command("ip", routeCmd...)
 	if err := cmd.Run(); err == nil {
 		// Table exists, flush it
-		cmd = exec.Command("ip", "route", "flush", "table", "87")
+		flushCmd := []string{"route", "flush", "table", "87"}
+		if isIPv6 {
+			flushCmd = append([]string{"-6"}, flushCmd...)
+		}
+		cmd = exec.Command("ip", flushCmd...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -588,7 +636,11 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Add default route for the src IP
-	cmd = exec.Command("ip", "route", "add", "default", "via", config.IphelperGateway, "table", "87")
+	routeCmd = []string{"route", "add", "default", "via", gatewayIP, "table", "87"}
+	if isIPv6 {
+		routeCmd = append([]string{"-6"}, routeCmd...)
+	}
+	cmd = exec.Command("ip", routeCmd...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
