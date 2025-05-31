@@ -228,7 +228,7 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 }
 
 func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
-	// List all routes first
+	// Clear IPv4 routes
 	stream, err := client.ListPath(ctx, &api.ListPathRequest{
 		TableType: api.TableType_GLOBAL,
 		Family: &api.Family{
@@ -237,10 +237,10 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list routes: %v", err)
+		return fmt.Errorf("failed to list IPv4 routes: %v", err)
 	}
 
-	// Process each route
+	// Process each IPv4 route
 	for {
 		response, err := stream.Recv()
 		if err != nil {
@@ -252,9 +252,38 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 			Path: response.Destination.Paths[0],
 		})
 		if err != nil {
-			return fmt.Errorf("failed to delete route %s: %v", response.Destination.Prefix, err)
+			return fmt.Errorf("failed to delete IPv4 route %s: %v", response.Destination.Prefix, err)
 		}
-		fmt.Printf("Deleted route: %s\n", response.Destination.Prefix)
+		fmt.Printf("Deleted IPv4 route: %s\n", response.Destination.Prefix)
+	}
+
+	// Clear IPv6 routes
+	stream, err = client.ListPath(ctx, &api.ListPathRequest{
+		TableType: api.TableType_GLOBAL,
+		Family: &api.Family{
+			Afi:  api.Family_AFI_IP6,
+			Safi: api.Family_SAFI_UNICAST,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list IPv6 routes: %v", err)
+	}
+
+	// Process each IPv6 route
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			break // End of stream
+		}
+
+		// Delete each route individually
+		_, err = client.DeletePath(ctx, &api.DeletePathRequest{
+			Path: response.Destination.Paths[0],
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete IPv6 route %s: %v", response.Destination.Prefix, err)
+		}
+		fmt.Printf("Deleted IPv6 route: %s\n", response.Destination.Prefix)
 	}
 
 	fmt.Println("All routes cleared successfully")
