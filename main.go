@@ -83,6 +83,8 @@ func loadConfig() error {
 
 func createCommunityAttributes() ([]*anypb.Any, error) {
 	var attrs []*anypb.Any
+	var standardCommunities []uint32
+	var largeCommunities []*api.LargeCommunity
 
 	for _, communityStr := range config.Communities {
 		// Split the community value into parts
@@ -111,21 +113,12 @@ func createCommunityAttributes() ([]*anypb.Any, error) {
 				return nil, fmt.Errorf("invalid local data 2 in large community: %s", parts[2])
 			}
 
-			// Create the large community attribute
-			largeCommunity := &api.LargeCommunitiesAttribute{
-				Communities: []*api.LargeCommunity{
-					{
-						GlobalAdmin: uint32(globalAdmin),
-						LocalData1:  uint32(localData1),
-						LocalData2:  uint32(localData2),
-					},
-				},
-			}
-			largeCommunityAttr, err := anypb.New(largeCommunity)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create large community attribute: %v", err)
-			}
-			attrs = append(attrs, largeCommunityAttr)
+			// Add to large communities list
+			largeCommunities = append(largeCommunities, &api.LargeCommunity{
+				GlobalAdmin: uint32(globalAdmin),
+				LocalData1:  uint32(localData1),
+				LocalData2:  uint32(localData2),
+			})
 		} else if len(parts) == 2 {
 			// Process as standard community
 			as, err := strconv.ParseUint(parts[0], 10, 32)
@@ -138,18 +131,35 @@ func createCommunityAttributes() ([]*anypb.Any, error) {
 				return nil, fmt.Errorf("invalid value in standard community: %s", parts[1])
 			}
 
-			// Create the standard community attribute
-			community := &api.CommunitiesAttribute{
-				Communities: []uint32{uint32(as<<16 | value)},
-			}
-			communityAttr, err := anypb.New(community)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create standard community attribute: %v", err)
-			}
-			attrs = append(attrs, communityAttr)
+			// Add to standard communities list
+			standardCommunities = append(standardCommunities, uint32(as<<16|value))
 		} else {
 			return nil, fmt.Errorf("invalid community format: %s", communityStr)
 		}
+	}
+
+	// Create standard communities attribute if we have any
+	if len(standardCommunities) > 0 {
+		community := &api.CommunitiesAttribute{
+			Communities: standardCommunities,
+		}
+		communityAttr, err := anypb.New(community)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create standard community attribute: %v", err)
+		}
+		attrs = append(attrs, communityAttr)
+	}
+
+	// Create large communities attribute if we have any
+	if len(largeCommunities) > 0 {
+		largeCommunity := &api.LargeCommunitiesAttribute{
+			Communities: largeCommunities,
+		}
+		largeCommunityAttr, err := anypb.New(largeCommunity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create large community attribute: %v", err)
+		}
+		attrs = append(attrs, largeCommunityAttr)
 	}
 
 	return attrs, nil
@@ -326,24 +336,26 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 			// Check RPKI validation for each ASN
 			prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
 			for _, asn := range asns {
-				maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
+				maxRpkiLength, maxOrigin, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
 				if err != nil {
 					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
 					continue
 				}
+
 				if maxRpkiLength > 48 {
 					maxRpkiLength = 48
 				}
-				for i := prefixLen; i <= maxRpkiLength; i++ {
-					prefix := fmt.Sprintf("%s/%d", ip, i)
-					np, err := utils.NormalizePrefix(prefix)
-					if err != nil {
-						log.Fatal(err)
-					}
-					fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+
+				// Consider ROA valid if it matches prefix and max length
+				// The ASN mismatch is expected in hijacking scenario
+				prefix := fmt.Sprintf("%s/%d", ip, maxRpkiLength)
+				np, err := utils.NormalizePrefix(prefix)
+				if err != nil {
+					log.Fatal(err)
 				}
+				fmt.Printf("[DEBUG] Valid prefix: %s with origin %d (max length: %d)\n", np, maxOrigin, maxRpkiLength)
 				strategyLen = maxRpkiLength
-				strategyAsn = asn
+				strategyAsn = maxOrigin
 			}
 		} else {
 			fmt.Printf("[DEBUG] Current announcement is 48\n")
@@ -356,24 +368,26 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 			// Check RPKI validation for each ASN
 			prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
 			for _, asn := range asns {
-				maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
+				maxRpkiLength, maxOrigin, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
 				if err != nil {
 					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
 					continue
 				}
+
 				if maxRpkiLength > 24 {
 					maxRpkiLength = 24
 				}
-				for i := prefixLen; i <= maxRpkiLength; i++ {
-					prefix := fmt.Sprintf("%s/%d", ip, i)
-					np, err := utils.NormalizePrefix(prefix)
-					if err != nil {
-						log.Fatal(err)
-					}
-					fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+
+				// Consider ROA valid if it matches prefix and max length
+				// The ASN mismatch is expected in hijacking scenario
+				prefix := fmt.Sprintf("%s/%d", ip, maxRpkiLength)
+				np, err := utils.NormalizePrefix(prefix)
+				if err != nil {
+					log.Fatal(err)
 				}
+				fmt.Printf("[DEBUG] Valid prefix: %s with origin %d (max length: %d)\n", np, maxOrigin, maxRpkiLength)
 				strategyLen = maxRpkiLength
-				strategyAsn = asn
+				strategyAsn = maxOrigin
 			}
 		} else {
 			fmt.Printf("[DEBUG] Current announcement is 24\n")
