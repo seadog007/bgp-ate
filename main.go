@@ -467,7 +467,7 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 	return nil
 }
 
-func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain string, ip string, dryrun bool) error {
+func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain string, ips []net.IP, dryrun bool) error {
 	// Create a user. New accounts need an email and private key to start.
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -496,8 +496,13 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 	}
 
 	// We specify an HTTP port of 80 and on all interfaces
-	err = legoClient.Challenge.SetHTTP01Provider(http01.NewProviderServer(ip, "80"))
-	fmt.Printf("[DEBUG] Set HTTP01 provider for domain: %s on interface: %s\n", domain, ip)
+	// Create a slice of IP addresses to listen on
+	var listenIPs []string
+	for _, ip := range ips {
+		listenIPs = append(listenIPs, ip.String())
+	}
+	fmt.Printf("[DEBUG] Setting HTTP01 provider for domain: %s on interfaces: %v\n", domain, listenIPs)
+	err = legoClient.Challenge.SetHTTP01Provider(http01.NewProviderServer("", "80"))
 	if err != nil {
 		return fmt.Errorf("failed to set HTTP01 provider: %v", err)
 	}
@@ -608,8 +613,8 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 		fmt.Println("[INFO] Wait completed")
 	}
 
-	// Generate certificate using the first IP for HTTP challenge
-	if err := generateCertificate(client, ctx, domain, ips[0].String(), dryrun); err != nil {
+	// Generate certificate using all IPs for HTTP challenge
+	if err := generateCertificate(client, ctx, domain, ips, dryrun); err != nil {
 		// Even if generate certificate failed, we still need to clear routes
 		if err := clearRoutes(client, ctx); err != nil {
 			fmt.Printf("[DANGER] Failed to clear routes: %v\n", err)
