@@ -119,7 +119,7 @@ go build
 
 ### Generate Certificate
 ```bash
-./bgpate certgen <domain> [--dryrun]
+./bgpate certgen <domain> [--dryrun] [--ip <ip1,ip2,...>]
 ```
 
 ### IP Helper
@@ -150,7 +150,25 @@ curl --interface <ip> https://1.1.1.1/cdn-cgi/trace
 ```
 
 ## Full Certification Generating Attack Procedures
-TBD
+# Use domain resolution (original behavior)
+```bash
+./bgpate certgen example.com
+```
+
+# Use domain resolution with dryrun
+```bash
+./bgpate certgen example.com --dryrun
+```
+
+# Override with specific IPs (comma-separated)
+```bash
+./bgpate certgen example.com --ip 192.168.1.1,2001:db8::1
+```
+
+# Override with IPs and dryrun
+```bash
+./bgpate certgen example.com --dryrun --ip 192.168.1.1,2001:db8::1
+```
 
 ## Notes
 

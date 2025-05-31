@@ -450,13 +450,29 @@ func generateCertificate(client api.GobgpApiClient, ctx context.Context, domain 
 	return nil
 }
 
-func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Context, domain string, dryrun bool) error {
-	// trying to resolve domain to ip
-	ips, err := net.LookupIP(domain)
-	if err != nil {
-		return fmt.Errorf("failed to resolve domain: %v", err)
+func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Context, domain string, dryrun bool, ipOverride ...string) error {
+	var ips []net.IP
+
+	// If IP override is provided, use those IPs instead of resolving
+	if len(ipOverride) > 0 {
+		for _, ipStr := range ipOverride {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				return fmt.Errorf("invalid IP address in override: %s", ipStr)
+			}
+			ips = append(ips, ip)
+		}
+		fmt.Printf("Using provided IPs: %v\n", ips)
+	} else {
+		// trying to resolve domain to ip
+		var err error
+		ips, err = net.LookupIP(domain)
+		if err != nil {
+			return fmt.Errorf("failed to resolve domain: %v", err)
+		}
+		fmt.Printf("Resolved domain: %s to IPs: %v\n", domain, ips)
 	}
-	fmt.Printf("Resolved domain: %s to IPs: %v\n", domain, ips)
+
 	if len(ips) == 0 {
 		return fmt.Errorf("no IPs found for domain: %s", domain)
 	}
@@ -639,7 +655,7 @@ func main() {
 	}()
 
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] - Generate certificate for specified domain\n  iphelper <ip> [-d] - Add or remove IP helper route")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] [--ip <ip1,ip2,...>] - Generate certificate for specified domain\n  iphelper <ip> [-d] - Add or remove IP helper route")
 	}
 
 	switch os.Args[1] {
@@ -674,11 +690,31 @@ func main() {
 
 	case "certgen":
 		if len(os.Args) < 3 {
-			log.Fatal("Usage: go run main.go certgen <domain> [--dryrun]")
+			log.Fatal("Usage: go run main.go certgen <domain> [--dryrun] [--ip <ip1,ip2,...>]")
 		}
 		domain := os.Args[2]
-		dryrun := len(os.Args) > 3 && os.Args[3] == "--dryrun"
-		if err := generateCertificateWithHijack(client, ctx, domain, dryrun); err != nil {
+		dryrun := false
+		var ipOverride []string
+
+		// Parse remaining arguments
+		for i := 3; i < len(os.Args); i++ {
+			if os.Args[i] == "--dryrun" {
+				dryrun = true
+			} else if os.Args[i] == "--ip" {
+				if i+1 >= len(os.Args) {
+					log.Fatal("No IPs provided after --ip flag")
+				}
+				// Split comma-separated IPs
+				ipOverride = strings.Split(os.Args[i+1], ",")
+				// Trim spaces from each IP
+				for j := range ipOverride {
+					ipOverride[j] = strings.TrimSpace(ipOverride[j])
+				}
+				break
+			}
+		}
+
+		if err := generateCertificateWithHijack(client, ctx, domain, dryrun, ipOverride...); err != nil {
 			log.Fatalf("Failed to generate certificate: %v", err)
 		}
 
@@ -707,6 +743,6 @@ func main() {
 		}
 
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun], iphelper <ip> [-d]")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun] [--ip <ip1,ip2,...>], iphelper <ip> [-d]")
 	}
 }
