@@ -331,7 +331,9 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
 					continue
 				}
-
+				if maxRpkiLength > 48 {
+					maxRpkiLength = 48
+				}
 				for i := prefixLen; i <= maxRpkiLength; i++ {
 					prefix := fmt.Sprintf("%s/%d", ip, i)
 					np, err := utils.NormalizePrefix(prefix)
@@ -359,7 +361,9 @@ func determinePrefixStrategy(ip string) (uint32, uint32, error) {
 					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
 					continue
 				}
-
+				if maxRpkiLength > 24 {
+					maxRpkiLength = 24
+				}
 				for i := prefixLen; i <= maxRpkiLength; i++ {
 					prefix := fmt.Sprintf("%s/%d", ip, i)
 					np, err := utils.NormalizePrefix(prefix)
