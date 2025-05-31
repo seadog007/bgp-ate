@@ -457,19 +457,22 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 		return fmt.Errorf("failed to resolve domain: %v", err)
 	}
 	fmt.Printf("Resolved domain: %s to IPs: %v\n", domain, ips)
-	if len(ips) > 1 {
-		return fmt.Errorf("multiple IPs found for domain: %s", domain)
-	}
-	ip := ips[0]
-
-	// Run IP helper
-	if err := iphelper(ip.String(), false); err != nil {
-		return fmt.Errorf("failed to run iphelper: %v", err)
+	if len(ips) == 0 {
+		return fmt.Errorf("no IPs found for domain: %s", domain)
 	}
 
-	// hijack routes
-	if err := hijackRoutes(client, ctx, ip.String(), dryrun); err != nil {
-		return fmt.Errorf("failed to hijack routes: %v", err)
+	// Run IP helper for each IP
+	for _, ip := range ips {
+		if err := iphelper(ip.String(), false); err != nil {
+			return fmt.Errorf("failed to run iphelper for %s: %v", ip.String(), err)
+		}
+	}
+
+	// hijack routes for each IP
+	for _, ip := range ips {
+		if err := hijackRoutes(client, ctx, ip.String(), dryrun); err != nil {
+			return fmt.Errorf("failed to hijack routes for %s: %v", ip.String(), err)
+		}
 	}
 
 	// Wait for the configured time before generating certificate
@@ -479,17 +482,18 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 		fmt.Println("[INFO] Wait completed")
 	}
 
-	// TODO: Generate certificate
-	if err := generateCertificate(client, ctx, domain, ip.String(), dryrun); err != nil {
+	// Generate certificate using the first IP for HTTP challenge
+	if err := generateCertificate(client, ctx, domain, ips[0].String(), dryrun); err != nil {
 		// Even if generate certificate failed, we still need to clear routes
 		if err := clearRoutes(client, ctx); err != nil {
 			fmt.Printf("[DANGER] Failed to clear routes: %v\n", err)
-			return fmt.Errorf("failed to clear routes: %v", err)
 		}
 
-		// Run IP helper delete
-		if err := iphelper(ip.String(), true); err != nil {
-			return fmt.Errorf("failed to run iphelper: %v", err)
+		// Run IP helper delete for each IP
+		for _, ip := range ips {
+			if err := iphelper(ip.String(), true); err != nil {
+				fmt.Printf("[DANGER] Failed to run iphelper delete for %s: %v\n", ip.String(), err)
+			}
 		}
 		return fmt.Errorf("failed to generate certificate: %v", err)
 	}
@@ -500,18 +504,19 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 		return nil
 	}
 
-	// clear routes
+	// Clear all routes at once
 	if err := clearRoutes(client, ctx); err != nil {
 		return fmt.Errorf("failed to clear routes: %v", err)
 	}
 
-	// Run IP helper delete
-	if err := iphelper(ip.String(), true); err != nil {
-		return fmt.Errorf("failed to run iphelper: %v", err)
+	// Run IP helper delete for each IP
+	for _, ip := range ips {
+		if err := iphelper(ip.String(), true); err != nil {
+			return fmt.Errorf("failed to run iphelper delete for %s: %v", ip.String(), err)
+		}
 	}
 
 	fmt.Println("Hijacked successfully")
-
 	return nil
 }
 
