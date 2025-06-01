@@ -1,19 +1,23 @@
 # BGP-ATE
 
-A tool for BGP route manipulation and certificate generation.
+BGP-ATE is a tool for BGP route hijacking and certificate generation.
 
 ## Features
 
-- BGP route manipulation
-- Certificate generation with various 
-- IP helper route management
-- Support for both standard and large communities
-- External Account Binding (EAB) support
+- BGP route hijacking
+- Certificate generation with route hijacking
+- HTTP requests with source IP spoofing
+- Support for both IPv4 and IPv6
+- RPKI validation
+- Community attribute support
+- Dry run mode for testing
 
 ## Prerequisites
 
 - Go 1.21 or later
 - GoBGP v3.37.0 or later
+- GoBGP daemon running on localhost:50051
+- Root privileges for iphelper command
 
 ## Installation
 
@@ -42,7 +46,7 @@ sudo gobgpbin/gobgpd -f gobgpd.conf
 ```
 2. Run the control system:
 ```bash
-./bgpaite
+./bgpate
 ```
 
 ## Configuration
@@ -54,7 +58,9 @@ The system uses `gobgpd.conf` for GoBGP configuration and `config.json` file for
     "communities": ["large:18041:999:2"],
     "time": 10,
     "timeBeforeGeneratingCertificate": 5,
-    "iphelperGateway": "192.168.99.1",
+    "timeBeforeExecutingCurl": 0,
+    "iphelperGatewayV4": "192.168.99.1",
+    "iphelperGatewayV6": "2401:16a0:999::1",
     "caDirUrl": "https://acme-v02.api.letsencrypt.org/directory",
     "eabKid": "",
     "eabHmacKey": ""
@@ -68,7 +74,9 @@ The system uses `gobgpd.conf` for GoBGP configuration and `config.json` file for
   - Large format: `"large:AS:value1:value2"` (e.g., `"large:18041:999:2"`)
 - `time`: Time in seconds to wait after hijacking
 - `timeBeforeGeneratingCertificate`: Time in seconds to wait before generating certificate
-- `iphelperGateway`: Gateway IP for iphelper command (optional, will use interface's default gateway if not specified)
+- `timeBeforeExecutingCurl`: Time in seconds to wait before executing curl request
+- `iphelperGatewayV4`: IPv4 Gateway IP for iphelper command
+- `iphelperGatewayV6`: IPv6 Gateway IP for iphelper command
 - `caDirUrl`: ACME CA directory URL (optional, defaults to Let's Encrypt production)
 - `eabKid`: External Account Binding Key ID (optional)
 - `eabHmacKey`: External Account Binding HMAC Key (optional)
@@ -127,6 +135,11 @@ go build
 ./bgpate iphelper <ip> [-d]
 ```
 
+### Make Curl Request
+```bash
+./bgpate curl <source_ip> <url> [--dryrun] [curl arguments...]
+```
+
 ## Full BGP Hijack Attack Procedures
 
 1. Run 
@@ -150,25 +163,25 @@ curl --interface <ip> https://1.1.1.1/cdn-cgi/trace
 ```
 
 ## Full Certification Generating Attack Procedures
-# Use domain resolution (original behavior)
+
+### Use domain resolution (original behavior)
 ```bash
 ./bgpate certgen example.com
 ```
 
-# Use domain resolution with dryrun
-```bash
-./bgpate certgen example.com --dryrun
-```
-
-# Override with specific IPs (comma-separated)
+### Override with specific IPs (comma-separated)
 ```bash
 ./bgpate certgen example.com --ip 192.168.1.1,2001:db8::1
 ```
 
-# Override with IPs and dryrun
+It will generate key-pair under `certs` folder
+
+## HTTP Reuqest from any IP with fast hijacking
 ```bash
-./bgpate certgen example.com --dryrun --ip 192.168.1.1,2001:db8::1
+./bgpate curl <ip> 'https://1.1.1.1/cdn-cgi/trace' [Other curl arguments]
 ```
+
+The attack succeed within less than 3 second against Cloudflare.
 
 ## Notes
 
